@@ -474,7 +474,8 @@ function sectionHtml(sec, d) {
 
   const rows = sec.items.map((it) => {
     const cls = (it.confirmed ? 'row-confirmed ' : '') + (it.isFatal ? 'row-fatal' : it.isStar ? 'row-star' : '');
-    const mark = it.isFatal ? '<span class="mk fatal">废标</span>' : it.isStar ? '<span class="mk star">★</span>' : '';
+    const ruleTag = it.source === 'rule-scan' ? '<span class="mk rule" title="关键词扫描命中，AI 未收录，按规则补入">关键词补入</span>' : '';
+    const mark = (it.isFatal ? '<span class="mk fatal">废标</span>' : it.isStar ? '<span class="mk star">★</span>' : '') + ruleTag;
     const cells = isTable
       ? (it.cells || [it.text]).map((c) => '<td>' + esc(c) + '</td>').join('')
       : '<td>' + mark + esc(it.text) + '</td>';
@@ -494,7 +495,9 @@ function sectionHtml(sec, d) {
 
   return '<div class="an-sec">' +
     '<div class="an-sec-head">' +
-      '<div><b>' + esc(sec.title) + '</b><span class="muted" style="margin-left:10px;font-size:13px">' + sec.items.length + ' 条 · 已确认 ' + confirmedCount + ' 条</span></div>' +
+      '<div><b>' + esc(sec.title) + '</b><span class="muted" style="margin-left:10px;font-size:13px">' + sec.items.length + ' 条 · 已确认 ' + confirmedCount + ' 条' +
+        (sec.key === 'fatal' && d && d.fatalScan ? ' · 关键词扫描命中 ' + d.fatalScan.strong + ' 条强候选' + (d.fatalScan.added ? '，补入 ' + d.fatalScan.added + ' 条' : '') : '') +
+        '</span></div>' +
       '<div class="row">' +
         '<button class="btn tiny" id="btnAddItem">＋ 手动添加一条</button>' +
         (sec.items.length ? '<button class="btn tiny" id="btnConfirmAll">全部标为已确认</button>' : '') +
@@ -1403,11 +1406,13 @@ function ckReqBlock(d, key) {
   const st = r.stat;
   const items = r.items || [];
   const need = items.filter((x) => x.s !== 2);
+  const fatalRisk = items.filter((x) => (x.fatal || x.fatalByRule || x.star) && x.s < 2);
   const chips = '<div class="ck-chips">' +
     '<span class="chip chip-ok">完全响应 ' + st.ok + '</span>' +
     '<span class="chip chip-warn">部分响应 ' + st.partial + '</span>' +
     '<span class="chip chip-bad">未响应 ' + st.missing + '</span>' +
     '<span class="chip chip-plain">共 ' + st.total + ' 条</span>' +
+    (fatalRisk.length ? '<span class="chip chip-bad">废标/★条款未完全响应 ' + fatalRisk.length + '</span>' : '') +
     (r.overview ? '<span class="ck-ov">' + esc(r.overview) + '</span>' : '') +
   '</div>';
 
@@ -1417,7 +1422,7 @@ function ckReqBlock(d, key) {
 
   const rowHtml = (x) => {
     const s2 = CK_S[x.s] || CK_S[1];
-    const mark = (x.fatal ? '<span class="mk fatal">废标</span>' : '') + (x.star ? '<span class="mk star">★</span>' : '');
+    const mark = (x.fatal ? '<span class="mk fatal">废标</span>' : '') + (x.star ? '<span class="mk star">★</span>' : '') + (x.fatalByRule && !x.fatal ? '<span class="mk rule">条款含废标后果</span>' : '');
     return '<tr class="req-s' + x.s + '">' +
       '<td class="num">' + x.n + '</td>' +
       '<td><span class="lv ' + s2.cls + '">' + s2.t + '</span></td>' +
@@ -1432,10 +1437,12 @@ function ckReqBlock(d, key) {
 
   const body = '<div class="ck-flt"><button class="btn tiny active" data-rf="need">只看要改的 ' + need.length + '</button>' +
       '<button class="btn tiny" data-rf="s0">只看未响应 ' + st.missing + '</button>' +
+      (fatalRisk.length ? '<button class="btn tiny" data-rf="fatal">只看废标/★未完全响应 ' + fatalRisk.length + '</button>' : '') +
       '<button class="btn tiny" data-rf="all">全部 ' + st.total + '</button></div>' +
     (st.omittedPages ? '<div class="ck-note">这份投标文件较长，另有 ' + st.omittedPages + ' 页没放进本次核对范围，涉及这些页的判断请人工确认。</div>' : '') +
     '<div data-rfbox="need">' + tbl(need) + '</div>' +
     '<div data-rfbox="s0" hidden>' + tbl(items.filter((x) => x.s === 0)) + '</div>' +
+    '<div data-rfbox="fatal" hidden>' + tbl(fatalRisk) + '</div>' +
     '<div data-rfbox="all" hidden>' + tbl(items) + '</div>' +
     '<div class="ck-more muted">判断依据是投标文件的实际内容：只有明确写了对应内容、材料或表述才算完全响应；只写「满足」而没有具体内容、或属于装订密封现场递交等电子文件看不出的事项，都按部分响应列出来，提请你在递交时人工确认。</div>';
   return ckFold(key, '招标文件要求逐条对照', chips, body);
@@ -1558,6 +1565,8 @@ function viewCheck() {
       '<div class="ck-num">' + (ck.data ? ck.data.fatal : '—') + '<span>必须改</span></div>' +
       '<div class="ck-num amber">' + (ck.data ? ck.data.warn : '—') + '<span>建议核对</span></div>' +
       (ck.data && ck.data.reqTotal ? '<div class="ck-num gray">' + ck.data.reqTotal + '<span>条要求逐条对照</span></div>' : '') +
+      (ck.data && ck.data.docs.some((d) => d.req && d.req.stat && d.req.stat.riskyFatal > 0)
+        ? '<div class="ck-num amber">' + ck.data.docs.reduce((n, d) => n + ((d.req && d.req.stat && d.req.stat.riskyFatal) || 0), 0) + '<span>废标条款未完全响应</span></div>' : '') +
       '<div class="ck-num gray">' + (ck.data ? ck.data.docs.length : ck.sources.length) + '<span>份文件</span></div>' +
     '</div>' +
     '<div class="ck-btns">' +

@@ -1,5 +1,6 @@
 // 模块4：AI 逐条核查 + 深度模拟评标
 import { callJson } from './ai.mjs';
+import { isFatalClause } from './fatalScan.mjs';
 
 // 每份文件要对照招标文件的哪些板块
 const REQ_MAP = {
@@ -63,7 +64,8 @@ export function flattenRequirements(analysis, kind) {
         text,
         page: it.page == null ? null : Number(it.page),
         star: !!it.isStar,
-        fatal: !!it.isFatal
+        fatal: !!it.isFatal,
+        fatalByRule: isFatalClause(text)
       });
     }
   }
@@ -224,12 +226,17 @@ const SYSTEM_REQ_CHECK = `你是政府采购与工程招标的评标专家。你
 - 1 = 部分响应：提到了但不完整（缺关键要素、缺证明材料、缺签章、只写"满足"没有具体内容），或者这条要求属于装订/密封/现场递交等电子文件无法体现的，一并标 1 并说明需现场确认。
 - 0 = 未响应：在投标文件里找不到对应内容。
 
+硬性要求：
+- 每一条判 2 或 1 的，必须在 e 里抄一段投标文件里的证据原句；e 为空的不许判 2。
+- 标 [废标] / [条款含废标后果] 的条目：只要投标文件里没有明确对应内容，或招标要求的证明材料/证书/凭证没出现在文件里，一律判 0，不得因为「这类材料一般都会提供」判 1 或 2。只有文字提到了、只是不完整（缺签名、缺页、写"满足"但无实质内容）才判 1。
+- 标 [废标] 的条目判 1 或 0 时，note 必须直接写明「不满足将被判废标」；标 [★] 的条目是实质性条款，负偏离同样可能被判无效，note 要写明风险。
+
 输出要求：严格 JSON，不要任何解释文字。对给你的每一条编号 n 都要有一条结果，不得遗漏、不得新增编号。
 {"results":[{"n":1,"s":2,"e":"投标文件里的证据原句，最多40字，没有就留空","note":"缺什么或为什么只给1/0，最多40字"}],"overview":"对这份文件响应情况的一句话总评，最多60字"}`;
 
 function reqUser(project, list, docText, docName) {
   const lines = list.map((it) => {
-    const mark = (it.fatal ? '[废标]' : '') + (it.star ? '[★]' : '');
+    const mark = (it.fatal ? '[废标]' : '') + (it.fatalByRule && !it.fatal ? '[条款含废标后果]' : '') + (it.star ? '[★]' : '');
     const pg = it.page ? '[招标第' + it.page + '页]' : '';
     return it.n + '. ' + mark + pg + '（' + it.secTitle + '）' + it.text.slice(0, 400);
   }).join('\n');
@@ -299,7 +306,9 @@ export async function aiRequirementCheck(project, analysis, pages, docName, onSt
     ok: items.filter((x) => x.s === 2).length,
     partial: items.filter((x) => x.s === 1).length,
     missing: items.filter((x) => x.s === 0).length,
-    missFatal: items.filter((x) => x.s === 0 && (x.fatal || x.star)).length,
+    missFatal: items.filter((x) => x.s === 0 && (x.fatal || x.star || x.fatalByRule)).length,
+    // 废标/实质性条款判「部分响应」也是风险（缺材料、缺签章），单独计数给界面提示
+    riskyFatal: items.filter((x) => x.s === 1 && (x.fatal || x.fatalByRule || x.star)).length,
     omittedPages: maxOmitted
   };
   return { items, stat, overview, failedBatches: failed };

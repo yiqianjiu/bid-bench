@@ -441,6 +441,7 @@ route('GET', '/api/projects/:id/analysis', async (req, res, ctx) => {
     analyzedPages: data ? data.analyzedPages : 0,
     fileName: data ? data.fileName : '',
     failedSegments: data ? data.failedSegments : [],
+    fatalScan: data ? data.fatalScan || null : null,
     registry: SECTIONS,
     running: running && running.state === 'running' ? { taskId: running.taskId, message: running.message, step: running.step, total: running.total } : null
   });

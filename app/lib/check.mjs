@@ -494,6 +494,8 @@ export function startCheckTask(project, sources, analysis) {
           one.fatal = one.checks.filter((c) => c.level === 'fatal').length + (reqStat ? reqStat.missFatal : 0);
           one.warn = one.checks.filter((c) => c.level === 'warn').length
             + (reqStat ? ((reqStat.missing - reqStat.missFatal) > 0 ? 1 : 0) + (reqStat.partial > 0 ? 1 : 0) : 0);
+          // 废标/★条款只做到「部分响应」（缺材料、缺签章）也单独提示，这一项交人工确认
+          if (reqStat && reqStat.riskyFatal > 0) one.warn += 1;
         } catch (e) {
           one.error = e.message;
         }

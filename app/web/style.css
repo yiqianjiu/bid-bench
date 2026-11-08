@@ -134,6 +134,7 @@ table.list tr:last-child td { border-bottom: none; }
 .mk { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-right: 6px; vertical-align: 1px; font-weight: 600; }
 .mk.star { background: #fff1cc; color: #96650c; border: 1px solid #f0d389; }
 .mk.fatal { background: #fbe0e0; color: #b6242e; border: 1px solid #f0b8b8; }
+.mk.rule { background: #eef2ff; color: #3b4ea8; border: 1px solid #c6d1f2; }
 .txt-red { color: #b6242e; }
 .txt-amber { color: #96650c; }
 
@@ -317,6 +318,7 @@ label.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 1
 .req-t .mk { display:inline-block; margin-right:5px; padding:0 5px; border-radius:4px; font-size:11px; font-weight:600; }
 .req-t .mk.star { background:#fff3d6; color:#8a6100; }
 .req-t .mk.fatal { background:#fdeaea; color:#c0261f; }
+.req-t .mk.rule { background:#eef2ff; color:#3b4ea8; }
 .req-ev { margin-top:3px; color:#8a9099; font-size:11.5px; }
 .req-tbl tr:nth-child(even) td { background:#fcfdff; }
 .ck-more { padding:8px 14px 0; font-size:11.5px; line-height:1.6; }

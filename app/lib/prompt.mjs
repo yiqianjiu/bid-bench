@@ -64,10 +64,35 @@ export const SYSTEM_ANALYSIS = [
   '2. 每一条都必须带原文页码 page 和原文摘录 quote。',
   '3. 尽可能穷尽：凡是影响「会不会被废标」「能不能得分」「怎么印刷装订递交」的条款都要抓出来，宁可多不可漏。',
   '4. 星号条款（★/▲/※）和废标项要单独标 isStar / isFatal。',
-  '5. 只输出 JSON。'
+  '5. 废标项识别是重点，必须按下面的实务策略做：',
+  '   · 凡出现「有效 / 应当 / 满足 / 禁止 / 否决 / 不能 / 要求 / 视为 / 无效 / 承诺 / 不得 / 必须 / 星号 / 资格 / 废标 / 响应 / 需要 / 应该」这类关键性词汇的句子，极大概率是废标/无效投标条款，必须逐条看语义确认，不能只看章节标题。',
+  '   · 判为废标项的依据（满足任一条）：① 原句直接写明「废标 / 无效投标 / 响应无效 / 否决投标 / 不予受理 / 取消资格 / 视为未响应」；② 星号（★▲※）条款且写明「不满足即作无效处理 / 负偏离即无效」；③ 「未…的 / 不…的，视为…」这类条件+后果句，且后果构成废标或丧失成交资格。',
+  '   · 只是普通合规要求、没有废标后果的，不要塞进 fatal（会让清单失去重点），放到对应板块并保留原文条件。',
+  '   · 废标条款常分散在「废标条款 / 无效投标条款 / 资格审查 / 符合性审查 / 前附表 / 评标办法 / 签订合同」等多处，必须全篇逐段扫描，不能只看标题叫废标的章节。',
+  '6. 只输出 JSON。'
 ].join('\n');
 
-export function analysisUserPrompt(fullText) {
+function fatalCandBlock(cand) {
+  if (!cand) return '';
+  const strong = (cand.strong || []).slice(0, 60);
+  const weak = (cand.weak || []).slice(0, 40);
+  if (!strong.length && !weak.length) return '';
+  const lines = [
+    '【系统关键词预扫描：下面这些原句命中了实务中高频的废标信号词，请逐条判定语义 ——',
+    '  判定成立的，必须收进 key=fatal（text 抄原句，page 用给的行号）；只是普通要求的，放回对应板块或忽略。】'
+  ];
+  if (strong.length) {
+    lines.push('— 已写明废标后果（基本可直接认定）：');
+    strong.forEach((s) => lines.push('  · [第' + s.page + '页] ' + s.text));
+  }
+  if (weak.length) {
+    lines.push('— 疑似（星号条款或「条件+后果」句式，需你判断）：');
+    weak.forEach((s) => lines.push('  · [第' + s.page + '页] ' + s.text));
+  }
+  return lines.join('\n');
+}
+
+export function analysisUserPrompt(fullText, cand) {
   return [
     '请按下面的结构输出「关键信息清单」JSON：',
     '{',
@@ -104,6 +129,8 @@ export function analysisUserPrompt(fullText) {
     '  · score 只收评委实际打分的评分项；不要单列「商务部分分值比重/技术部分分值比重」这类分值分配说明。',
     '- 商务/技术要求里的星号项把 isStar 设为 true；文件明确写「不满足即废标/无效投标」的，isFatal 设为 true。',
     '- 废标板块（key=fatal）每一条都要 isFatal=true，并把原文整句抄进 text。',
+    '',
+    fatalCandBlock(cand),
     '',
     '文件全文如下：',
     fullText

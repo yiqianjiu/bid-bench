@@ -107,7 +107,9 @@ export function exportCheckDocx(project, check, outPath) {
   blocks.push(p(`核查时间：${new Date(check.checkAt).toLocaleString('zh-CN')}`, { center: true, size: 21, after: 200 }));
 
   blocks.push(p(`总体结论：${verdictText}`, { bold: true, size: 24, before: 120 }));
-  blocks.push(p(`必须改 ${check.fatal} 项，建议核对 ${check.warn} 项，共核查 ${check.docs.length} 份文件，逐条对照招标文件要求 ${check.reqTotal || 0} 条。`, { size: 21, after: 120 }));
+  const riskyTotal = check.docs.reduce((n, d) => n + ((d.req && d.req.stat && d.req.stat.riskyFatal) || 0), 0);
+  blocks.push(p(`必须改 ${check.fatal} 项，建议核对 ${check.warn} 项，共核查 ${check.docs.length} 份文件，逐条对照招标文件要求 ${check.reqTotal || 0} 条。` +
+    (riskyTotal ? `其中有 ${riskyTotal} 条废标/★实质性条款只做到「部分响应」（缺材料、缺签章或只写了"满足"），这类条款没有部分响应一说，递交前必须补齐，详见各份文件的逐条对照表。` : ''), { size: 21, after: 120 }));
   if (!check.aiUsed) {
     blocks.push(p('说明：本次没有接入 AI 或还没有做「招标分析」，因此只做了格式与页码等基础检查，没有逐条对照招标要求。建议先跑一次招标分析再核查。', { size: 19, color: 'C00000', after: 120 }));
   }
@@ -121,7 +123,8 @@ export function exportCheckDocx(project, check, outPath) {
     }
     const reqStat = d.req && d.req.stat;
     blocks.push(p(`共 ${d.pages} 页。基础检查：必须改 ${d.checks.filter((c) => c.level === 'fatal').length} 项、建议核对 ${d.checks.filter((c) => c.level === 'warn').length} 项。` +
-      (reqStat ? `招标要求逐条对照：共 ${reqStat.total} 条，完全响应 ${reqStat.ok} 条、部分响应 ${reqStat.partial} 条、未响应 ${reqStat.missing} 条（其中带★或废标 ${reqStat.missFatal} 条）。` : ''), { size: 20, after: 80 }));
+      (reqStat ? `招标要求逐条对照：共 ${reqStat.total} 条，完全响应 ${reqStat.ok} 条、部分响应 ${reqStat.partial} 条、未响应 ${reqStat.missing} 条（其中带★或废标 ${reqStat.missFatal} 条）。` +
+        (reqStat.riskyFatal ? `废标/★实质性条款未完全响应 ${reqStat.riskyFatal} 条，必须逐条补齐。` : '') : ''), { size: 20, after: 80 }));
 
     // 1.1 基础检查
     blocks.push(p('（一）格式与要素检查', { bold: true, size: 22, before: 120, after: 60 }));
@@ -160,7 +163,7 @@ export function exportCheckDocx(project, check, outPath) {
           { k: 'note', t: '差在哪儿 / 怎么补', w: 30 }
         ], need.map((x, i) => ({
           no: i + 1,
-          req: (x.fatal ? '【废标】' : '') + (x.star ? '★' : '') + (x.page ? '[第' + x.page + '页] ' : '') + '（' + x.secTitle + '）' + x.text,
+          req: (x.fatal ? '【废标】' : x.fatalByRule ? '【含废标后果】' : '') + (x.star ? '★' : '') + (x.page ? '[第' + x.page + '页] ' : '') + '（' + x.secTitle + '）' + x.text,
           s: S_TEXT[x.s],
           note: [x.note, x.evidence ? '已出现：' + x.evidence : ''].filter(Boolean).join('；'),
           __fill: S_FILL[x.s]
@@ -179,7 +182,7 @@ export function exportCheckDocx(project, check, outPath) {
           { k: 'e', t: '投标文件中的证据', w: 24 }
         ], okList.map((x, i) => ({
           no: i + 1,
-          req: (x.fatal ? '【废标】' : '') + (x.star ? '★' : '') + (x.page ? '[第' + x.page + '页] ' : '') + x.text,
+          req: (x.fatal ? '【废标】' : x.fatalByRule ? '【含废标后果】' : '') + (x.star ? '★' : '') + (x.page ? '[第' + x.page + '页] ' : '') + x.text,
           s: S_TEXT[x.s],
           e: x.evidence || '',
           __fill: 'F2F7F2'

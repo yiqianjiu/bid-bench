@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// 工作目录不写死：默认取本程序所在目录的上一级（本地就是 D:\投标工作台），
+// 工作目录不写死：默认取本程序所在目录的上一级，
 // 也可以用环境变量 TWB_ROOT 指定（比如把程序和数据分开放在不同盘）。
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const APP_DIR = path.resolve(HERE, '..');
@@ -22,7 +22,7 @@ export const DEFAULT_CONFIG = {
   deepseekBaseUrl: 'https://api.deepseek.com',
   deepseekModel: 'deepseek-flash',
   company: '',
-  version: '1.0.1'
+  version: '1.0.2'
 };
 
 export function ensureDirs() {

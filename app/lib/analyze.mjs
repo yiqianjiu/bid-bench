@@ -6,6 +6,7 @@ import { ensureText, ocrPages, writeTextCache } from './text.mjs';
 import { callJson, apiReady } from './ai.mjs';
 import { SYSTEM_ANALYSIS, analysisUserPrompt, SYSTEM_SCORE, scoreUserPrompt, SECTIONS } from './prompt.mjs';
 import { uid, nowIso } from './util.mjs';
+import { scanFatalCandidates } from './fatalScan.mjs';
 
 export const ANALYSIS_DIR = path.join(DATA_DIR, '分析');
 const TASKS_DIR = path.join(ANALYSIS_DIR, '.tasks');
@@ -213,6 +214,11 @@ async function runAnalysis(db, p, task, opts) {
   const limit = Math.min(pageCount, opts.maxPages || MAX_PAGES);
   task.truncated = pageCount > limit;
 
+  // 关键词预扫描：先把「废标信号词」原句捞出来，逐段递给 AI 判语义，最后再补齐漏掉的
+  task.message = '正在扫描废标项关键词…';
+  persistTask(task);
+  const fatalCand = scanFatalCandidates(cache.pages, { maxPages: limit });
+
   const segs = segmentPages(limit);
   if (!segs.length) throw new Error('这份招标文件没有可读内容（共 ' + pageCount + ' 页），无法分析。');
   task.segTotal = segs.length;
@@ -241,7 +247,11 @@ async function runAnalysis(db, p, task, opts) {
     let lastErr = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        out = await callJson(SYSTEM_ANALYSIS, analysisUserPrompt(text), { maxTokens: 12000, timeoutMs: 300000 });
+        const segCand = {
+          strong: fatalCand.strong.filter((s) => s.page >= a && s.page <= b),
+          weak: fatalCand.weak.filter((s) => s.page >= a && s.page <= b).slice(0, 40)
+        };
+        out = await callJson(SYSTEM_ANALYSIS, analysisUserPrompt(text, segCand), { maxTokens: 12000, timeoutMs: 300000 });
         lastErr = null;
         break;
       } catch (e) {
@@ -278,6 +288,31 @@ async function runAnalysis(db, p, task, opts) {
       }
     }
     persistTask(task);
+  }
+
+  // 2.5) 关键词补漏：规则扫出来、AI 又没收进废标板块的原句，直接补进去
+  let ruleAdded = 0;
+  const fatalSec = byKey.get('fatal');
+  if (fatalSec) {
+    for (const s of fatalCand.strong) {
+      const key = normalize(s.text);
+      if (!key) continue;
+      const hit = fatalSec.items.some((it) => {
+        const t = itemKey(it, 'fatal');
+        return t === key || similarity(t, key) >= 0.55;
+      });
+      if (hit) continue;
+      fatalSec.items.push(makeItem({
+        text: s.text,
+        page: s.page,
+        quote: s.text.slice(0, 400),
+        isFatal: true,
+        isStar: !!s.star,
+        category: '关键词扫描'
+      }, 'fatal', 'rule-scan'));
+      ruleAdded++;
+    }
+    fatalSec.items.sort((x, y) => (x.page || 99999) - (y.page || 99999));
   }
 
   // 3) 评分表补跑
@@ -349,6 +384,7 @@ async function runAnalysis(db, p, task, opts) {
     stat,
     starCount,
     fatalCount,
+    fatalScan: { strong: fatalCand.counts.strong, weak: fatalCand.counts.weak, scanned: fatalCand.counts.scanned, added: ruleAdded },
     failedSegments: task.failedSegments,
     analysisAt: nowIso()
   };
@@ -363,7 +399,7 @@ async function runAnalysis(db, p, task, opts) {
 
   run(db, 'UPDATE projects SET analysisAt = ?, analysisStat = ?, updatedAt = ? WHERE id = ?',
     data.analysisAt, JSON.stringify({ stat, starCount, fatalCount }), nowIso(), p.id);
-  addEvent(db, p.id, 'analysis', '完成招标分析：星号 ' + starCount + ' 条，废标 ' + fatalCount + ' 条，共 ' + Object.values(stat).reduce((a, b) => a + b, 0) + ' 条');
+  addEvent(db, p.id, 'analysis', '完成招标分析：星号 ' + starCount + ' 条，废标 ' + fatalCount + ' 条（其中关键词扫描补入 ' + ruleAdded + ' 条），共 ' + Object.values(stat).reduce((a, b) => a + b, 0) + ' 条');
 
   task.state = task.failedSegments.length ? 'partial' : 'done';
   task.step = task.total;
