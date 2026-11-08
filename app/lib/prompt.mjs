@@ -1,0 +1,186 @@
+export const SYSTEM_OCR = [
+  '你是一个精准的中文文档 OCR 引擎，专门处理招标文件扫描件。',
+  '要求：逐行忠实转写，不总结、不省略、不补全；表格用「单元格 | 单元格」逐行表示；',
+  '保留原文的编号、星号（★▲※）、金额、日期、页码等一切细节。',
+  '只输出 JSON，格式 {"text":"转写全文","blank":false}。'
+].join('\n');
+
+export const SYSTEM_META = [
+  '你是中国招投标领域的资深投标经理，擅长从招标（采购）文件中精准抽取投标决策所需的关键信息。',
+  '严格要求：',
+  '1. 只依据我给你的文件内容作答，绝不编造。找不到的字段一律填空字符串，并在 evidence 里说明「文件中未找到」。',
+  '2. 每个字段都要给出出处页码（page 为阿拉伯数字，依据正文中的【第 N 页】标记）。',
+  '3. 金额、日期、份数等原样照抄原文表述，不要换算、不要改写。',
+  '4. 只输出 JSON，不要任何解释文字。'
+].join('\n');
+
+export function metaUserPrompt(fullText) {
+  return [
+    '下面是一份招标（采购）文件的全文，每页前面有【第 N 页】标记。请抽取项目关键信息，输出如下 JSON：',
+    '{',
+    '  "code": "项目编号/招标编号",',
+    '  "name": "项目名称",',
+    '  "owner": "招标人/采购人",',
+    '  "agency": "代理机构（没有就留空）",',
+    '  "budget": "预算金额（含单位，原样）",',
+    '  "bidDeadline": "投标/响应文件递交截止时间，格式尽量为 YYYY-MM-DD HH:mm",',
+    '  "openTime": "开标（开启）时间，格式尽量为 YYYY-MM-DD HH:mm",',
+    '  "openPlace": "开标（开启）地点",',
+    '  "deposit": "投标（响应）保证金金额与缴纳方式，原样概括",',
+    '  "purchaseMethod": "采购方式，如公开招标/询比采购/竞争性磋商/竞争性谈判/单一来源",',
+    '  "packageNo": "包号（没有就留空）",',
+    '  "company": "要求投标人具备的关键资质（一句话概括，没有就留空）",',
+    '  "notes": "投标人最容易踩坑的 2-3 条提醒（来自文件中的强调条款）",',
+    '  "evidence": [{"field":"code","page":1,"quote":"原文片段"}]',
+    '}',
+    '',
+    '文件全文如下：',
+    fullText
+  ].join('\n');
+}
+
+// 13 个板块的登记表（顺序即页面顺序）
+export const SECTIONS = [
+  { key: 'format', title: '版面格式要求', group: '通用要求', type: 'list' },
+  { key: 'print', title: '印刷·制作·密封要求', group: '通用要求', type: 'list' },
+  { key: 'onsite', title: '现场投递注意事项', group: '通用要求', type: 'list' },
+  { key: 'sign', title: '签字盖章要求', group: '通用要求', type: 'list' },
+  { key: 'fatal', title: '废标/无效投标项', group: '通用要求', type: 'list', danger: true },
+  { key: 'frontTable', title: '前附表关键要素', group: '编制要求', type: 'table', columns: ['项目', '内容'] },
+  { key: 'qualify', title: '资格性审查表', group: '编制要求', type: 'table', columns: ['序号', '审查因素', '审查内容'] },
+  { key: 'conform', title: '符合性审查表', group: '编制要求', type: 'table', columns: ['序号', '审查因素', '审查内容'] },
+  { key: 'score', title: '综合评分表', group: '编制要求', type: 'table', columns: ['序号', '评分项', '分值', '评分标准'] },
+  { key: 'business', title: '商务要求与条款', group: '编制要求', type: 'list' },
+  { key: 'tech', title: '技术要求与条款', group: '编制要求', type: 'list' },
+  { key: 'deliver', title: '交付内容/成果', group: '编制要求', type: 'list' },
+  { key: 'other', title: '其他需注意', group: '编制要求', type: 'list' }
+];
+
+export const SYSTEM_ANALYSIS = [
+  '你是中国招投标领域的资深投标文件编制专家，精通政府采购与工程/服务类采购的合规要求。',
+  '任务：把招标（采购）文件拆成一份可以直接指导编标的「关键信息清单」。',
+  '严格要求：',
+  '1. 只依据给定文件内容，不编造；文件里没有的项目，该项 items 返回空数组。',
+  '2. 每一条都必须带原文页码 page 和原文摘录 quote。',
+  '3. 尽可能穷尽：凡是影响「会不会被废标」「能不能得分」「怎么印刷装订递交」的条款都要抓出来，宁可多不可漏。',
+  '4. 星号条款（★/▲/※）和废标项要单独标 isStar / isFatal。',
+  '5. 只输出 JSON。'
+].join('\n');
+
+export function analysisUserPrompt(fullText) {
+  return [
+    '请按下面的结构输出「关键信息清单」JSON：',
+    '{',
+    '  "sections": [',
+    '    {',
+    '      "key": "format",',
+    '      "title": "版面格式要求",',
+    '      "items": [{"text":"要求内容（一条一事，保留关键数字）","page":12,"quote":"原文片段","isStar":false,"isFatal":false,"category":"格式"}]',
+    '    }',
+    '  ]',
+    '}',
+    '',
+    'sections 必须包含且仅包含以下 13 个 key（按此顺序），title 用我给的中文名：',
+    '1. key=format      title=版面格式要求',
+    '2. key=print       title=印刷制作与密封要求',
+    '3. key=onsite      title=授权代表现场投递要求',
+    '4. key=sign        title=法人及授权代表签字盖章要求',
+    '5. key=fatal       title=废标项/无效投标项',
+    '6. key=frontTable  title=前附表关键信息',
+    '7. key=qualify     title=资格性审查表',
+    '8. key=conform     title=符合性审查表',
+    '9. key=score       title=综合评分表',
+    '10. key=business  title=商务要求/商务条款',
+    '11. key=tech      title=技术要求/技术条款',
+    '12. key=deliver   title=交付内容/成果',
+    '13. key=other     title=其他重要要求',
+    '',
+    '条目写法：',
+    '- 普通板块（1-5、10-13）：item 只需 {text,page,quote,isStar,isFatal}。text 一条一事，保留关键数字与单位，不要合并多件事。',
+    '- 表格板块（6 前附表 / 7 资格性审查 / 8 符合性审查 / 9 综合评分表）：item 用 {cells,page,quote,isStar,isFatal}，cells 是按列顺序的字符串数组。',
+    '  · frontTable 的 cells 固定两列：[项目, 内容]，例如 ["投标有效期","90 日历天"]',
+    '  · qualify / conform 的 cells 固定三列：[序号, 审查因素, 审查内容]',
+    '  · score 的 cells 固定四列：[序号, 评分项, 分值, 评分标准]，分值写「10分」这种形式，没有序号就写空串',
+    '  · score 只收评委实际打分的评分项；不要单列「商务部分分值比重/技术部分分值比重」这类分值分配说明。',
+    '- 商务/技术要求里的星号项把 isStar 设为 true；文件明确写「不满足即废标/无效投标」的，isFatal 设为 true。',
+    '- 废标板块（key=fatal）每一条都要 isFatal=true，并把原文整句抄进 text。',
+    '',
+    '文件全文如下：',
+    fullText
+  ].join('\n');
+}
+
+export const SYSTEM_SCORE = [
+  '你是中国招投标领域的评标专家，任务是从招标文件中把「评分办法 / 评分标准 / 综合评分表」完整、无遗漏地抽出来。',
+  '注意：评分表常常跨多页、以表格形式出现，且有些加分项只写在评分表里、正文不提。',
+  '严格要求：只依据给定内容，不编造；每条都给页码；只输出 JSON。'
+].join('\n');
+
+export function scoreUserPrompt(fullText) {
+  return [
+    '请找出这份招标文件里的评分办法（评标办法/综合评分表/评分细则），输出 JSON：',
+    '{ "items": [ {"cells":["1","投标报价","30分","满足招标文件要求且投标价格最低的得满分"],"page":42,"quote":"原文片段","isStar":false,"isFatal":false} ] }',
+    'cells 固定四列：[序号, 评分项, 分值, 评分标准]。分值如「30分」，评分标准要抄全（含得分档位、加分条件、扣分情形）。',
+    '只列真正的评分项（评委实际打分的条目）。不要单列「商务部分分值比重/技术部分分值比重」这类分值分配说明，也不要重复同一评分项。',
+    '若文件采用「最低评标价法」而无评分表，返回 {"items":[],"method":"最低评标价法"}。',
+    '',
+    '文件全文如下：',
+    fullText
+  ].join('\n');
+}
+
+// ---------- 模块3：投标文件正文生成 ----------
+export const SYSTEM_DRAFT = [
+  '你是中国招投标领域的资深标书编写专家，负责撰写投标（响应）文件的正文。',
+  '硬性要求：',
+  '1. 只输出正文内容本身，不要输出标题、不要 markdown 标记（不要 #、**、```），不要写「以下是…」。',
+  '2. 用中文书面语，正式、具体、有诚意，避免空话套话堆砌；适当分条、分段，段落之间空一行。',
+  '3. 严禁编造事实：公司名称一律写「我方」；具体的业绩项目名称、合同金额、人员姓名、证书编号、荣誉奖项等，一律写成【请填写：xxx】占位，绝不虚构。',
+  '4. 【必须严格依据招标文件】本章内容只能以本题招标文件的原文为依据，不得写成放在任何项目上都成立的通用模板。每一段都要对着下面给出的招标文件条款原文来写：',
+  '   - 招标文件规定了格式、栏目、顺序、表述方式的，就按它的格式、栏目、顺序和表述来写；',
+  '   - 招标文件写了具体指标（数量、期限、频次、响应时间、地点、人员数量、证书种类、服务内容等）的，必须原文引用该指标并写明我方的落实措施，不能含糊带过；',
+  '   - 给出的条款必须条条有响应，不得遗漏、不得合并成一句笼统的话；',
+  '   - 严禁写与本项目无关的通用套话（如无具体指向的「体系健全」「流程闭环」等空泛表述），凡是写出来的都必须落到本项目的具体要求上。',
+  '5. 【技术类章节】必须逐条、逐项对应招标文件的技术需求／技术要求／技术指标：按招标文件技术条款的顺序，一条一条写清楚「该项要求是什么、我方如何满足（设备、方法、人员、流程、指标承诺）」，让评委能拿着招标文件一条条对照打分；不要把这些条款合并归纳成几大类后再泛泛论述。',
+  '6. 【商务类章节】必须逐条对应招标文件的商务条款（交付时间地点方式、付款、质保、售后、知识产权、保密、违约等）；星号（★）条款必须明确写出「完全响应、无偏离」。',
+  '7. 如果给了【对应评分标准】，要针对每一个评分点写出能拿到该分值的具体内容，不要只泛泛提及。',
+  '8. 如果给了字数要求，尽量贴近，不要明显超出。',
+  '9. 不要重复其他章节的内容；需要时写「详见××章节」。'
+].join('\n');
+
+export function draftUserPrompt(ctx) {
+  const L = [];
+  L.push('请为下面这一章撰写投标文件正文。');
+  L.push('');
+  L.push('【项目信息】');
+  L.push('项目名称：' + (ctx.projectName || '—'));
+  L.push('招标编号：' + (ctx.projectCode || '—'));
+  L.push('招标人：' + (ctx.owner || '—'));
+  L.push('采购方式：' + (ctx.method || '—'));
+  L.push('预算金额：' + (ctx.budget || '—'));
+  L.push('投标截止时间：' + (ctx.deadline || '—'));
+  L.push('');
+  L.push('【所在文件】' + (ctx.docName || '投标文件') + ' ／ 【本章标题】' + (ctx.chapterTitle || ''));
+  if (ctx.hint) { L.push('【本章必须覆盖的要求】'); L.push(ctx.hint); }
+  if (ctx.scoreStandard) { L.push('【对应评分标准（要逐条拿到分）】'); L.push(ctx.scoreStandard); }
+  if (ctx.clauses && ctx.clauses.length) {
+    L.push('【招标文件原文条款 —— 下面每一条都必须在正文里有对应响应，一条都不能漏】');
+    L.push('（共 ' + ctx.clauses.length + ' 条。要求：按下面的顺序写，每条先点明该条要求，再写我方的具体做法或承诺。）');
+    ctx.clauses.forEach((c, i) => L.push((i + 1) + '. ' + (c.page ? '[第' + c.page + '页] ' : '') + c.text));
+  } else {
+    L.push('【招标文件条款】本次没有检索到与本章直接对应的条款。请你只围绕本章标题与上面给出的要求写，不要编造招标文件内容。');
+  }
+  if (ctx.outline && ctx.outline.length) {
+    L.push('【本文件其他章节（不要重复写它们的内容）】');
+    L.push(ctx.outline.slice(0, 40).join('、'));
+  }
+  L.push('');
+  L.push('【字数要求】' + (ctx.words || 450) + ' 字左右。');
+  if (ctx.mode === 'expand' && ctx.current) {
+    L.push('【现在这一章已有的内容（请在此基础上扩写、细化、补足评分点，保留已有的事实与措辞，不要推倒重写）】');
+    L.push(String(ctx.current).slice(0, 6000));
+  }
+  L.push('');
+  L.push('直接输出正文。');
+  return L.join('\n');
+}

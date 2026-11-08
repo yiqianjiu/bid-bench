@@ -1,0 +1,26 @@
+# 依赖
+node_modules/
+
+# 运行数据（项目、上传文件、数据库、导出结果）—— 绝不提交
+数据/
+项目/
+归档/
+模板/
+app/数据/
+app/项目/
+app/归档/
+
+# 本地配置：里面有你自己的 DeepSeek API Key
+config.json
+app/config.json
+
+# 临时文件
+tmp/
+*.log
+*.tmp
+~$*
+
+# 系统
+Thumbs.db
+.DS_Store
+desktop.ini

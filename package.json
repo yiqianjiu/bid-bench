@@ -1,0 +1,30 @@
+{
+  "name": "bid-bench",
+  "version": "1.0.1",
+  "private": false,
+  "type": "module",
+  "description": "投标业务工作台 —— 面向投标专员的全流程本地工作台：招标文件解析、逐条响应核查、模拟评标、标书框架生成、递交清单与归档",
+  "keywords": [
+    "投标",
+    "标书",
+    "招标",
+    "bid",
+    "tender",
+    "工作台",
+    "DeepSeek"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node app/server.mjs",
+    "dev": "node app/server.mjs"
+  },
+  "dependencies": {
+    "docx": "9.15.2",
+    "mammoth": "1.13.0",
+    "pdf-to-img": "7.0.2",
+    "pdfjs-dist": "6.4.299"
+  }
+}

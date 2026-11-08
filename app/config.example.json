@@ -1,0 +1,8 @@
+{
+  "port": 7830,
+  "deepseekApiKey": "",
+  "deepseekBaseUrl": "https://api.deepseek.com",
+  "deepseekModel": "deepseek-flash",
+  "company": "",
+  "version": "1.0.1"
+}
