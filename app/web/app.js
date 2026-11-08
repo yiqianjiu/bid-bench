@@ -1037,8 +1037,10 @@ function viewDraft() {
         : useOrig ? (origNo ? origNo + ' ' : '')
         : (i + 1) + '. ';
       const titleCls = useOrig && !origNo ? ' df-ch-t-part' : '';
+      const typeTag = TYPE_TAG[c.type] || '';
+      const typeTagText = typeTag.replace(/<[^>]+>/g, '');
       const main = '<div class="df-ch-main" data-ch="' + c.id + '" data-go="open" style="padding-left:' + pad + 'px">' +
-        '<div class="df-ch-t' + titleCls + '">' + esc(numTxt + c.title) + ' ' + (TYPE_TAG[c.type] || '') + ' ' + srcTag + '</div>' +
+        '<div class="df-ch-t' + titleCls + '">' + esc(numTxt + c.title) + ' ' + (typeTagText && typeTagText !== c.title ? typeTag : '') + ' ' + srcTag + '</div>' +
         '<div class="df-ch-s">' + esc(c.hint || '') + '</div></div>' +
         '<div class="df-ch-n">' + cnt + '</div>' +
         '<div class="df-ch-a">' + actions +
