@@ -181,7 +181,16 @@ function renderProject() {
     : S.tab === 'submit' ? viewSubmit()
     : viewSoon();
 
-  $('#main').innerHTML = '<div class="page">' + head + '<div class="tabs">' + tabs + '</div><div id="tabBody">' + body + '</div></div>';
+  const roBanner = p.status === 'archived'
+    ? '<div class="ro-banner">🔒 本项目已于 ' + esc(String(p.closedAt || '').replace('T', ' ').slice(0, 16)) + ' 关闭归档，现在只能查看。' +
+      (p.closedBy === 'abandon' ? '（放弃投标' + (p.abandonReason ? '：' + esc(p.abandonReason) : '') + '）' : '') +
+      ' 要修改请点［重新打开］。' +
+      '<button class="btn tiny" data-ro-reopen="' + esc(p.id) + '">重新打开</button></div>'
+    : '';
+  $('#main').innerHTML = '<div class="page">' + head + roBanner + '<div class="tabs">' + tabs + '</div><div id="tabBody">' + body + '</div></div>';
+  const roBtn = $('#main').querySelector('[data-ro-reopen]');
+  if (roBtn) roBtn.onclick = () => reopenProject(roBtn.dataset.roReopen);
+
 
   $('#main').querySelectorAll('.tab').forEach((el) => {
     el.onclick = () => { S.tab = el.dataset.tab; renderProject(); syncHash(); };
@@ -191,6 +200,31 @@ function renderProject() {
 
 function viewSoon() {
   return '<div class="placeholder">这个模块还在做。先把「项目信息」和「招标文件」用好，后面几块会陆续开放。</div>';
+}
+
+
+/* ---------- v1.1.2 独立编制：开一个独立窗口 ---------- */
+function openIndep(cid, docKey) {
+  if (!S.cur) return;
+  const w = 1360;
+  const h = 900;
+  const left = Math.max(0, Math.round((screen.availWidth - w) / 2));
+  const top = Math.max(0, Math.round((screen.availHeight - h) / 2));
+  const url = '/indep.html?p=' + encodeURIComponent(S.cur.id) + '&d=' + encodeURIComponent(docKey) + '&c=' + encodeURIComponent(cid);
+  const win = window.open(url, 'twb-indep-' + cid,
+    'width=' + w + ',height=' + h + ',left=' + left + ',top=' + top + ',resizable=yes,scrollbars=yes');
+  if (!win) {
+    toast('浏览器拦了新窗口，请允许弹出窗口，或者按住 Ctrl 再点一次', true);
+    return;
+  }
+  win.focus();
+  // 独立窗口里可能写回正文 / 导出 Word，关掉后刷新一下当前页
+  const timer = setInterval(() => {
+    if (win.closed) {
+      clearInterval(timer);
+      reloadDraft().catch(() => {});
+    }
+  }, 1200);
 }
 
 /* ---------- 页签：项目信息 ---------- */
@@ -213,14 +247,15 @@ const FIELD_DEFS = [
 
 function viewInfo() {
   const p = S.cur;
+  const ro = p.status === 'archived';
   const fields = FIELD_DEFS.map(([k, label, type, full]) => {
     if (type === 'readonly') {
       return '<div class="field"><label>' + label + '</label><input value="' + esc(p[k] || '') + '" readonly></div>';
     }
     const hint = type === 'datetime' ? '<div class="hint">格式：2026-12-31 09:30</div>' : '';
     const input = type === 'textarea'
-      ? '<textarea rows="3" data-k="' + k + '" placeholder="可留空">' + esc(p[k] || '') + '</textarea>'
-      : '<input data-k="' + k + '" value="' + esc(p[k] || '') + '" placeholder="' + (type === 'datetime' ? '2026-12-31 09:30' : '可留空') + '">';
+      ? '<textarea rows="3" data-k="' + k + '"' + (ro ? ' readonly' : '') + ' placeholder="可留空">' + esc(p[k] || '') + '</textarea>'
+      : '<input data-k="' + k + '"' + (ro ? ' readonly' : '') + ' value="' + esc(p[k] || '') + '" placeholder="' + (type === 'datetime' ? '2026-12-31 09:30' : '可留空') + '">';
     return '<div class="field' + (full === 'full' ? ' full' : '') + '"><label>' + label + '</label>' + input + hint + '</div>';
   }).join('');
 
@@ -229,12 +264,17 @@ function viewInfo() {
   ).join('');
 
   return '<div class="card"><h3>项目基本信息</h3><div class="grid">' + fields + '</div>' +
-    '<div class="row" style="margin-top:16px"><button class="btn primary" id="btnSaveInfo">保存修改</button>' +
-    '<span class="muted" style="font-size:13px">信息可以随时改。资料不全没关系，先把知道的填上。</span></div></div>' +
+    '<div class="row" style="margin-top:16px">' +
+    (ro
+      ? '<span class="muted" style="font-size:13px">项目已关闭归档，信息只能查看。要改请点上面的「重新打开」。</span>'
+      : '<button class="btn primary" id="btnSaveInfo">保存修改</button>' +
+        '<span class="muted" style="font-size:13px">信息可以随时改。资料不全没关系，先把知道的填上。</span>') +
+    '</div></div>' +
     '<div class="card"><h3>最近操作</h3>' +
     (events ? '<table class="list">' + events + '</table>' : '<div class="muted">还没有操作记录</div>') + '</div>' +
-    '<div class="card"><h3>危险操作</h3><div class="row"><button class="btn danger" id="btnDelete">删除这个项目</button>' +
-    '<span class="muted" style="font-size:13px">会把 D 盘里这个项目的文件夹一并删掉，删了找不回来。</span></div></div>';
+    '<div class="card" id="procCard"><h3>过程记录</h3><div class="muted">正在读取…</div></div>' +
+    (ro ? '' : '<div class="card"><h3>危险操作</h3><div class="row"><button class="btn danger" id="btnDelete">删除这个项目</button>' +
+    '<span class="muted" style="font-size:13px">会把 D 盘里这个项目的文件夹一并删掉，删了找不回来。</span></div></div>');
 }
 
 /* ---------- 页签：招标文件 ---------- */
@@ -675,6 +715,7 @@ function bindTabEvents() {
   if (S.tab === 'check' && !S.ck) loadCheckFor(S.cur.id);
   if (S.tab === 'submit' && !S.sb) loadSubmitFor(S.cur.id);
   if (S.tab === 'info') {
+    loadProcessCard();
     const save = $('#btnSaveInfo');
     if (save) save.onclick = saveInfo;
     const del = $('#btnDelete');
@@ -704,6 +745,42 @@ function bindTabEvents() {
       };
     });
   }
+}
+
+async function loadProcessCard() {
+  const box = $('#procCard');
+  if (!box || !S.cur) return;
+  try {
+    const d = await api('GET', '/api/projects/' + S.cur.id + '/process');
+    const list = (d.entries || []).slice(-40).reverse();
+    box.innerHTML = '<h3>过程记录 <span class="muted" style="font-size:12px;font-weight:400">（关闭归档时会一起进归档文件夹的 06过程记录）</span></h3>' +
+      '<div class="row" style="margin-bottom:10px"><button class="btn tiny" id="btnAddProc">记一笔</button></div>' +
+      (list.length
+        ? '<table class="list">' + list.map((e) =>
+            '<tr><td style="width:150px;color:#8a9099;white-space:nowrap">' + esc(String(e.at || '').replace('T', ' ').slice(0, 16)) + '</td>' +
+            '<td><b>' + esc(e.title) + '</b>' + (e.detail ? '<div class="muted" style="font-size:12px;white-space:pre-wrap">' + esc(String(e.detail).slice(0, 400)) + '</div>' : '') + '</td></tr>'
+          ).join('') + '</table>'
+        : '<div class="muted">还没有记录。上传招标文件、做分析、写标书这些动作会自动记在这里，也可以自己补一笔。</div>');
+    const b = $('#btnAddProc');
+    if (b) b.onclick = addProcessNote;
+  } catch (e) {
+    box.innerHTML = '<h3>过程记录</h3><div class="muted">读取失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function addProcessNote() {
+  openModal('<h3>记一笔过程</h3>' +
+    '<div class="grid"><div class="field full"><label>做了什么</label><input id="pcTitle" placeholder="例如：和甲方确认了交付时间"></div>' +
+    '<div class="field full"><label>细节（可留空）</label><textarea id="pcDetail" rows="3"></textarea></div></div>' +
+    '<div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okProc">保存</button></div>');
+  $('#okProc').onclick = async () => {
+    const title = $('#pcTitle').value.trim();
+    if (!title) { toast('写一句做了什么', true); return; }
+    try {
+      await api('POST', '/api/projects/' + S.cur.id + '/process', { kind: 'note', title, detail: $('#pcDetail').value.trim() });
+      closeModal(); toast('已记录'); loadProcessCard();
+    } catch (e) { toast(e.message, true); }
+  };
 }
 
 async function saveInfo() {
@@ -895,6 +972,8 @@ function newProjectDialog() {
       '<div class="field"><label>招标单位</label><input id="npOwner" placeholder="可留空"></div>' +
       '<div class="field"><label>预算金额</label><input id="npBudget" placeholder="可留空"></div>' +
     '</div>' +
+    '<label class="chk-row"><input type="checkbox" id="npBackfill"> <span>这是<b>补录项目</b>（已经投完/早已过截止，只是补建个档）</span></label>' +
+    '<div class="hint" style="margin:-6px 0 8px 26px">补录项目不受「投标截止前不能关闭归档」的限制，建好就能直接归档。</div>' +
     '<div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okNew">创建</button></div>');
   $('#okNew').onclick = async () => {
     const name = $('#npName').value.trim();
@@ -902,7 +981,8 @@ function newProjectDialog() {
     try {
       const r = await api('POST', '/api/projects', {
         name, code: $('#npCode').value.trim(), bidDeadline: $('#npDeadline').value.trim(),
-        owner: $('#npOwner').value.trim(), budget: $('#npBudget').value.trim()
+        owner: $('#npOwner').value.trim(), budget: $('#npBudget').value.trim(),
+        isBackfill: $('#npBackfill').checked
       });
       closeModal();
       await refreshProjects();
@@ -1055,8 +1135,12 @@ function viewDraft() {
       const cnt = needRow ? ((c.rows || []).length + ' 条') : (chars ? chars + ' 字' : '空');
       const actions = c.type === 'normal'
         ? '<button class="btn tiny" data-ch="' + c.id + '" data-go="open">' + (chars ? '查看/编辑' : '手写') + '</button>' +
+          (cur.status === 'archived' ? '' : 
           '<button class="btn tiny" data-ch="' + c.id + '" data-go="write">' + (chars ? '重写' : 'AI 写正文') + '</button>' +
-          (chars ? '<button class="btn tiny" data-ch="' + c.id + '" data-go="expand">扩写</button>' : '')
+          (chars ? '<button class="btn tiny" data-ch="' + c.id + '" data-go="expand">扩写</button>' : '')) +
+          (c.role === 'tech' || c.role === 'biz'
+            ? '<button class="btn tiny indep" data-indep="' + c.id + '" title="开一个独立窗口，边聊边改，可以生成图/表并导出验收用 Word">独立编制</button>'
+            : '')
         : (needRow ? '<button class="btn tiny" data-ch="' + c.id + '" data-go="table">查看/编辑</button>' : '');
       const lv = Number(c.level) || 1;
       const pad = lv >= 3 ? 52 : lv === 2 ? 26 : 0;
@@ -1083,8 +1167,8 @@ function viewDraft() {
         '<div class="df-ch-s">' + esc(c.hint || '') + '</div></div>' +
         '<div class="df-ch-n">' + cnt + '</div>' +
         '<div class="df-ch-a">' + actions +
-          '<button class="btn tiny" data-ch="' + c.id + '" data-go="rename">改名</button>' +
-          '<button class="btn tiny danger" data-ch="' + c.id + '" data-go="del">删</button></div>';
+          (cur.status === 'archived' ? '' : '<button class="btn tiny" data-ch="' + c.id + '" data-go="rename">改名</button>' +
+          '<button class="btn tiny danger" data-ch="' + c.id + '" data-go="del">删</button>') + '</div>';
       const panel = isOpen ? chapterPanel(cur0, c) : '';
       return '<div class="df-ch' + (isOpen ? ' open' : '') + '">' + main + panel + '</div>';
     }).join('');
@@ -1092,13 +1176,14 @@ function viewDraft() {
     right = '<div class="df-head">' +
       '<div><b>' + esc(cur0.title) + '</b> <span class="muted" style="font-size:13px">共 ' + cur0.chapters.length + ' 章</span></div>' +
       '<div class="row" style="gap:8px">' +
-        '<button class="btn" id="btnAddCh">＋加一章</button>' +
-        '<button class="btn" id="btnReviewRoles" title="让 AI 把每章重新判一遍属于重要技术还是重要商务">AI 复核章节性质</button>' +
-        '<button class="btn" id="btnRefreshTables">刷新索引/偏离表</button>' +
-        '<button class="btn" id="btnImport">上传我写的 Word</button>' +
-        (cur0.source === 'upload' ? '<button class="btn" id="btnRestoreOutline">恢复自动框架</button>' : '') +
+        (cur.status === 'archived' ? '' :
+          '<button class="btn" id="btnAddCh">＋加一章</button>' +
+          '<button class="btn" id="btnReviewRoles" title="让 AI 把每章重新判一遍属于重要技术还是重要商务">AI 复核章节性质</button>' +
+          '<button class="btn" id="btnRefreshTables">刷新索引/偏离表</button>' +
+          '<button class="btn" id="btnImport">上传我写的 Word</button>' +
+          (cur0.source === 'upload' ? '<button class="btn" id="btnRestoreOutline">恢复自动框架</button>' : '')) +
         '<button class="btn primary" id="btnExportDraft">下载 Word</button>' +
-        '<button class="btn" id="btnReOutline">重新生成框架</button>' +
+        (cur.status === 'archived' ? '' : '<button class="btn" id="btnReOutline">重新生成框架</button>') +
       '</div></div>' +
       '<input type="file" id="impInput" accept=".docx,.doc" style="display:none">' +
       '<div class="df-msg muted" id="dfMsg"></div>' +
@@ -1151,6 +1236,7 @@ function chapterPanel(doc, c) {
     '<div class="row" style="margin-top:10px"><button class="btn primary" data-savebody="' + c.id + '">保存正文</button>' +
     '<button class="btn" data-ch="' + c.id + '" data-go="write">AI 写一版</button>' +
     '<button class="btn" data-ch="' + c.id + '" data-go="expand">在现有内容上扩写</button>' +
+    (roleKind ? '<button class="btn indep" data-indep="' + c.id + '">独立编制（对话改稿 + 生成图表 + 导出 Word）</button>' : '') +
     '<button class="btn" data-close-ch="' + c.id + '">收起</button></div></div>';
 }
 
@@ -1187,6 +1273,14 @@ function bindDraftEvents() {
 
   const btnRe = $('#btnReOutline');
   if (btnRe) btnRe.onclick = () => startOutline(st.doc, true);
+
+  /* v1.1.2 独立编制：开一个独立的浏览器窗口，边聊边改 */
+  document.querySelectorAll('[data-indep]').forEach((el) => {
+    el.onclick = (ev) => {
+      ev.stopPropagation();
+      openIndep(el.dataset.indep, st.doc);
+    };
+  });
 
   /* 章节性质标签：点一下循环切换 重要技术 → 重要商务 → 不标注 */
   document.querySelectorAll('[data-rolebtn]').forEach((el) => {
@@ -2092,36 +2186,61 @@ function closeProjectDialog() {
   const sb = S.sb;
   const done = sb.data.items.filter((x) => x.done).length;
   const all = sb.data.items.length;
+  const year = new Date().getFullYear();
+
+  // v1.1.2：先查能不能关（截止时间门禁 / 补录项目 / 放弃投标）
+  api('GET', '/api/projects/' + S.cur.id + '/close-status').then((st) => {
+    if (!st.canClose) {
+      openModal('<h3>现在还不能关闭归档</h3>' +
+        '<div class="card" style="background:#fff5f5;border-color:#f0b9b9">' +
+        '<b style="color:#c53030">这个项目还在投标期内，不能关闭归档。</b><br>' +
+        '投标截止时间是 <b>' + esc(st.deadline || '（没填）') + '</b>，' +
+        '还剩 <b>' + esc(String(fmtLeft(st.deadline).big).replace(/^剩\s*/, '')) + '</b>。<br>' +
+        '<span class="muted" style="font-size:13px">按流程，标书递交、开标、评标都走完（或明确不投了）才归档。现在归档会把还没定稿的资料定格住。</span>' +
+        '</div>' +
+        '<p class="muted" style="font-size:13px">如果这个项目本来就不打算投了，可以点下面的「放弃投标，关闭归档」。</p>' +
+        '<div class="modal-foot"><button class="btn" data-close>知道了</button>' +
+        '<button class="btn danger" id="okAbandon">放弃投标，关闭归档</button></div>');
+      $('#okAbandon').onclick = () => abandonDialog(st);
+      return;
+    }
+    closeConfirmDialog(st, done, all, year);
+  }).catch((e) => toast(e.message, true));
+}
+
+function closeConfirmDialog(st, done, all, year) {
+  const pathText = rootPath() + '\\归档\\' + new Date().getFullYear() + '\\<招标编号_项目名>\\';
   openModal('<h3>关闭项目并归档</h3>' +
-    '<p>关闭后，这个项目会从「我的项目」移到「已归档」，同时把招标文件、分析结果、投标文件、核查报告、递交清单整套复制到：</p>' +
-    '<div class="card" style="background:#f7f9fc"><code style="font-size:13px">' + esc(rootPath() + '\\归档\\' + new Date().getFullYear() + '\\<招标编号_项目名>\\') + '</code></div>' +
-    '<p class="muted" style="font-size:13px">归档后还能打开查看、也能重新打开继续编辑，不会删掉任何东西。</p>' +
-    (done < all ? '<p class="warn-text">递交清单还有 ' + (all - done) + ' 项没勾，确认已经递交了吗？</p>' : '') +
+    '<div class="card" style="background:#fff5f5;border-color:#f0b9b9">' +
+    '<b style="color:#c53030">⚠ 这是重要节点，请确认。</b><br>' +
+    '关闭后这个项目会从「我的项目」移到「已归档」，整套资料（招标文件、分析、投标文件、核查报告、递交清单、过程记录）会复制到下面这个文件夹。' +
+    '<br><span class="muted" style="font-size:13px">归档后默认只能查看；要再改，得先点「重新打开」。' +
+    (st.isBackfill ? '（本项目是<b>补录项目</b>，不受截止时间限制。）' : '') + '</span>' +
+    '</div>' +
+    '<div class="card" style="background:#f7f9fc"><code style="font-size:13px">' + esc(pathText) + '</code></div>' +
+    '<div class="card" style="background:#f7f9fc">递交清单完成度：<b>' + done + ' / ' + all + '</b>' +
+      (done < all ? ' <span class="warn-text">还有 ' + (all - done) + ' 项没勾，确认已经递交了吗？</span>' : ' <span style="color:#2f855a">已全部完成</span>') + '</div>' +
     '<div class="grid"><div class="field full"><label>关闭说明（可留空，会写进归档文件夹）</label>' +
-    '<textarea id="clNote" rows="2" placeholder="例如：已中标 / 未中标，报价 32 万"></textarea></div></div>' +
-    '<div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okClose">关闭并归档</button></div>');
-  $('#okClose').onclick = async () => {
-    const btn = $('#okClose');
+    '<textarea id="clNote" rows="2" placeholder="例如：已中标 / 未中标，报价 32 万"></textarea></div>' +
+    '<div class="field full"><label>请手动输入「关闭归档」四个字确认</label>' +
+    '<input id="clConfirm" placeholder="关闭归档" autocomplete="off">' +
+    '<div class="hint">防止手滑点错。</div></div></div>' +
+    '<div class="modal-foot"><button class="btn" data-close>取消</button>' +
+    '<button class="btn danger" id="okClose" disabled>关闭并归档</button></div>');
+
+  const inp = $('#clConfirm');
+  const btn = $('#okClose');
+  inp.oninput = () => { btn.disabled = inp.value.trim() !== '关闭归档'; };
+  inp.focus();
+
+  btn.onclick = async () => {
+    if (inp.value.trim() !== '关闭归档') { toast('请先输入「关闭归档」四个字', true); return; }
     btn.disabled = true; btn.textContent = '归档中…';
     try {
-      const r = await api('POST', '/api/projects/' + S.cur.id + '/close', { note: $('#clNote').value.trim() });
+      const r = await api('POST', '/api/projects/' + S.cur.id + '/close', { note: $('#clNote').value.trim(), confirmText: '关闭归档' });
       closeModal();
       await refreshProjects();
-      const ks = r.knowledgeSummary;
-      const kbLine = ks
-        ? '<div class="card" style="background:#f2f7f2;border-color:#cfe3cf;margin-top:8px"><b>已沉淀进专家知识库</b>：' +
-          '重要技术 <b>' + (ks.tech || 0) + '</b> 章、重要商务 <b>' + (ks.biz || 0) + '</b> 章' +
-          ((ks.hasProfile && (ks.hasProfile.tech || ks.hasProfile.biz)) ? '，专家画像 ' +
-            [ks.hasProfile.tech ? '技术' : '', ks.hasProfile.biz ? '商务' : ''].filter(Boolean).join(' + ') + ' 各 1 份' : '') +
-          '。<br><span class="muted" style="font-size:13px">以后做同类项目时，AI 会参考这些经验（左侧「🧠 专家知识库」可以查看）。</span></div>'
-        : (r.knowledge && r.knowledge.error
-            ? '<p class="warn-text">知识库这次没写成功：' + esc(r.knowledge.error) + '<br>不影响归档，可以到「专家知识库」页对这个项目点「补录」。</p>'
-            : '<p class="muted" style="font-size:13px">这个项目没有标注重要技术/重要商务章节，所以知识库里没有内容。可以在「投标文件」页给章节打上「重要技术 / 重要商务」标签后，再来知识库点「补录」。</p>');
-      openModal('<h3>已归档</h3><p>项目已关闭，全部资料已归档到：</p>' +
-        '<div class="card" style="background:#f7f9fc"><code style="font-size:13px">' + esc(r.dir) + '</code></div>' +
-        '<p class="muted" style="font-size:13px">共 ' + r.files + ' 个文件。以后要在别的标书里复用，直接去这个文件夹找。</p>' +
-        kbLine +
-        '<div class="modal-foot"><button class="btn primary" data-close>知道了</button></div>');
+      showArchivedDialog(r);
       S.tab = 'info';
       await openProject(S.cur.id, true);
     } catch (e) {
@@ -2131,7 +2250,60 @@ function closeProjectDialog() {
   };
 }
 
-/* ================= 模块6：归档列表 ================= */
+function abandonDialog(st) {
+  openModal('<h3>放弃投标，关闭归档</h3>' +
+    '<div class="card" style="background:#fff5f5;border-color:#f0b9b9">' +
+    '<b style="color:#c53030">⚠ 这个项目会直接归档，状态标为「放弃投标」。</b><br>' +
+    '资料不会删，以后还能在「已归档」里打开查看或重新打开。' +
+    '</div>' +
+    '<div class="grid"><div class="field full"><label>放弃原因（必填，会写进归档）</label>' +
+    '<textarea id="abReason" rows="2" placeholder="例如：客户预算调整，本次不投 / 资质不满足，主动放弃"></textarea></div>' +
+    '<div class="field full"><label>请手动输入「关闭归档」四个字确认</label>' +
+    '<input id="abConfirm" placeholder="关闭归档" autocomplete="off"></div></div>' +
+    '<div class="modal-foot"><button class="btn" data-close>取消</button>' +
+    '<button class="btn danger" id="okAbandon2" disabled>确认放弃并归档</button></div>');
+  const inp = $('#abConfirm');
+  const btn = $('#okAbandon2');
+  const chk = () => { btn.disabled = !(inp.value.trim() === '关闭归档' && $('#abReason').value.trim().length >= 2); };
+  inp.oninput = chk;
+  $('#abReason').oninput = chk;
+  btn.onclick = async () => {
+    btn.disabled = true; btn.textContent = '归档中…';
+    try {
+      const r = await api('POST', '/api/projects/' + S.cur.id + '/close', {
+        mode: 'abandon', abandonReason: $('#abReason').value.trim(), confirmText: '关闭归档'
+      });
+      closeModal();
+      await refreshProjects();
+      showArchivedDialog(r);
+      S.tab = 'info';
+      await openProject(S.cur.id, true);
+    } catch (e) {
+      btn.disabled = false; btn.textContent = '确认放弃并归档';
+      toast(e.message, true);
+    }
+  };
+}
+
+function showArchivedDialog(r) {
+  const ks = r.knowledgeSummary;
+  const kbLine = ks
+    ? '<div class="card" style="background:#f2f7f2;border-color:#cfe3cf;margin-top:8px"><b>已沉淀进专家知识库</b>：' +
+      '重要技术 <b>' + (ks.tech || 0) + '</b> 章、重要商务 <b>' + (ks.biz || 0) + '</b> 章' +
+      ((ks.hasProfile && (ks.hasProfile.tech || ks.hasProfile.biz)) ? '，专家画像 ' +
+        [ks.hasProfile.tech ? '技术' : '', ks.hasProfile.biz ? '商务' : ''].filter(Boolean).join(' + ') + ' 各 1 份' : '') +
+      '。<br><span class="muted" style="font-size:13px">以后做同类项目时，AI 会参考这些经验（左侧「🧠 专家知识库」可以查看）。</span></div>'
+    : (r.knowledge && r.knowledge.error
+        ? '<p class="warn-text">知识库这次没写成功：' + esc(r.knowledge.error) + '<br>不影响归档，可以到「专家知识库」页对这个项目点「补录」。</p>'
+        : '<p class="muted" style="font-size:13px">这个项目没有标注重要技术/重要商务章节，所以知识库里没有内容。</p>');
+  openModal('<h3>已归档</h3><p>项目已关闭，全部资料已归档到：</p>' +
+    '<div class="card" style="background:#f7f9fc"><code style="font-size:13px">' + esc(r.dir) + '</code></div>' +
+    '<p class="muted" style="font-size:13px">共 ' + r.files + ' 个文件。以后要在别的标书里复用，直接去这个文件夹找。</p>' +
+    kbLine +
+    '<div class="modal-foot"><button class="btn primary" data-close>知道了</button></div>');
+}
+
+
 async function renderArchiveList() {
   let d;
   try { d = await api('GET', '/api/archives'); } catch (e) {
@@ -2162,23 +2334,25 @@ async function renderArchiveList() {
     };
   });
   document.querySelectorAll('[data-reopen]').forEach((b) => {
-    b.onclick = async () => {
-      const pid = b.dataset.reopen;
-      openModal('<h3>重新打开这个项目？</h3>' +
-        '<p>项目会回到「我的项目」里，可以继续编辑。<b>归档文件夹和知识库记录都会保留</b>，不会删掉。</p>' +
-        '<div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okReopen">重新打开</button></div>');
-      $('#okReopen').onclick = async () => {
-        try {
-          await api('POST', '/api/projects/' + pid + '/reopen', {});
-          closeModal(); toast('已重新打开');
-          await refreshProjects();
-          await openProject(pid, true);
-        } catch (e) { toast(e.message, true); }
-      };
-    };
+    b.onclick = () => reopenProject(b.dataset.reopen);
   });
 }
 
+
+function reopenProject(pid) {
+  openModal('<h3>重新打开这个项目？</h3>' +
+    '<p>项目会回到「我的项目」里，可以继续编辑。<b>归档文件夹和知识库记录都会保留</b>，不会删掉。</p>' +
+    '<p class="muted" style="font-size:13px">重新打开后如果又关闭一次，会再归档一份（以新的为准）。</p>' +
+    '<div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okReopen">重新打开</button></div>');
+  $('#okReopen').onclick = async () => {
+    try {
+      await api('POST', '/api/projects/' + pid + '/reopen', {});
+      closeModal(); toast('已重新打开');
+      await refreshProjects();
+      await openProject(pid, true);
+    } catch (e) { toast(e.message, true); }
+  };
+}
 
 /* ================= v1.1.0：专家知识库 ================= */
 async function renderKnowledgeList() {

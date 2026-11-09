@@ -54,6 +54,8 @@ async function chatOnce(messages, opts, attempt) {
   return content;
 }
 
+export async function chatMessages(messages, opts) { return chat(messages, opts); }
+
 async function chat(messages, opts) {
   // 大模型有时会先"想"很久、把输出额度耗光，导致正文为空；这里自动重试一次并放大额度。
   const first = { ...(opts || {}) };

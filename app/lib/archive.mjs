@@ -9,6 +9,7 @@ import { loadCheck } from './check.mjs';
 import { loadSubmit } from './submit.mjs';
 import { loadProfiles } from './profile.mjs';
 import { saveProjectKnowledge, keywordsOf } from './knowledge.mjs';
+import { copyProcessTo } from './process.mjs';
 
 function copyDir(src, dst) {
   if (!fs.existsSync(src)) return 0;
@@ -109,6 +110,16 @@ export function buildKnowledgePayload(project, db, opt = {}) {
       }));
     }
   }
+  // v1.1.2：独立编制的会话（对话记录 + 成稿 + 图表说明）也结构化进知识库
+  const sess = Array.isArray(opt.sessions) ? opt.sessions : [];
+  payload.sessions = sess.map((x) => ({
+    chapterId: x.chapterId, chapterTitle: x.chapterTitle, role: x.role,
+    title: x.title || '', text: String(x.text || '').slice(0, 30000),
+    messages: (x.messages || []).map((m) => ({ role: m.role, content: String(m.content || '').slice(0, 2000), at: m.at })),
+    charts: (x.charts || []).map((c) => ({ title: c.title, caption: c.caption, reason: c.reason, chartType: c.chartType, spec: c.spec })),
+    hints: x.hints || [],
+    createdAt: x.createdAt, updatedAt: x.updatedAt
+  }));
   payload.keywords = keywordsOf(project, profiles);
   return payload;
 }
@@ -125,6 +136,11 @@ export function archiveProject(project, db, opt = {}) {
   for (const sub of ['01招标文件', '02分析', '03制作', '04核查', '05递交']) {
     files += copyDir(path.join(src, sub), path.join(dst, sub));
   }
+
+  // v1.1.2：项目过程记录（结构化 JSON + 人可读 TXT）永久留档
+  try {
+    files += copyProcessTo(project.id, path.join(dst, '06过程记录'));
+  } catch {}
 
   const summary = buildArchiveSummary(project, db);
   fs.writeFileSync(path.join(dst, '项目摘要.json'), JSON.stringify(summary, null, 2), 'utf8');
@@ -155,7 +171,7 @@ export function archiveProject(project, db, opt = {}) {
   // v1.1.0：把本次投标的重要技术/商务内容沉淀进本地专家知识库（失败不影响归档）
   let knowledge = null;
   try {
-    const payload = buildKnowledgePayload(project, db);
+    const payload = buildKnowledgePayload(project, db, { sessions: opt.sessions || [] });
     knowledge = saveProjectKnowledge(project, payload);
     if (knowledge) files += 1;
   } catch (e) {

@@ -48,6 +48,10 @@ export function openDb(file) {
   ensureColumn(db, 'files', 'note', 'TEXT');
   ensureColumn(db, 'projects', 'analysisAt', 'TEXT');
   ensureColumn(db, 'projects', 'analysisStat', 'TEXT');
+  // v1.1.2：补录项目（已过投标截止时间后补录的历史项目，不受"截止前不能关闭归档"限制）
+  ensureColumn(db, 'projects', 'isBackfill', 'TEXT');
+  ensureColumn(db, 'projects', 'abandonReason', 'TEXT');
+  ensureColumn(db, 'projects', 'closedBy', 'TEXT');
   return db;
 }
 

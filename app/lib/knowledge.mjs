@@ -13,7 +13,7 @@ const DIR_CHAPTER = { tech: path.join(KB_DIR, '章节', '技术'), biz: path.joi
 const DIR_HISTORY = path.join(KB_DIR, '生成历史');
 
 export function ensureKb() {
-  [KB_DIR, DIR_PROFILE.tech, DIR_PROFILE.biz, DIR_CHAPTER.tech, DIR_CHAPTER.biz, DIR_HISTORY]
+  [KB_DIR, DIR_PROFILE.tech, DIR_PROFILE.biz, DIR_CHAPTER.tech, DIR_CHAPTER.biz, DIR_HISTORY, path.join(KB_DIR, '独立编制')]
     .forEach((d) => fs.mkdirSync(d, { recursive: true }));
 }
 
@@ -108,6 +108,15 @@ export function saveProjectKnowledge(project, payload) {
     }
   });
 
+  // v1.1.2：独立编制会话存档（对话 + 成稿 + 图表说明），跟着项目一起进知识库
+  if (payload.sessions && payload.sessions.length) {
+    writeJson(path.join(KB_DIR, '独立编制', pid + '.json'), {
+      projectId: pid, projectName: project.name || '', code: project.code || '',
+      archivedAt: rec.archivedAt, sessions: payload.sessions
+    });
+    rec.counts.indep = payload.sessions.length;
+  }
+
   if (payload.history && payload.history.length) {
     writeJson(path.join(DIR_HISTORY, pid + '.json'), {
       projectId: pid, projectName: project.name || '', archivedAt: rec.archivedAt, records: payload.history
@@ -117,7 +126,7 @@ export function saveProjectKnowledge(project, payload) {
   // v1.1.1：什么都没写进去（没有标注重要章节、也没有画像）就不要在索引里留一条空记录，
   // 否则列表里会出现「文件缺失」的假告警。
   const wroteAnything = rec.hasProfile.tech || rec.hasProfile.biz || rec.counts.tech || rec.counts.biz ||
-    (payload.history && payload.history.length);
+    rec.counts.indep || (payload.history && payload.history.length);
   idx.projects = (idx.projects || []).filter((x) => x.projectId !== pid);
   if (!wroteAnything) { saveIndex(idx); return null; }
   idx.projects.push(rec);
@@ -188,7 +197,8 @@ export function listKnowledge() {
       bizProfile: fs.existsSync(path.join(DIR_PROFILE.biz, r.projectId + '.json')),
       techChapters: fs.existsSync(path.join(DIR_CHAPTER.tech, r.projectId + '.json')),
       bizChapters: fs.existsSync(path.join(DIR_CHAPTER.biz, r.projectId + '.json')),
-      history: fs.existsSync(path.join(DIR_HISTORY, r.projectId + '.json'))
+      history: fs.existsSync(path.join(DIR_HISTORY, r.projectId + '.json')),
+      indep: fs.existsSync(path.join(KB_DIR, '独立编制', r.projectId + '.json'))
     };
     const missing = [];
     if (!files.techProfile) missing.push('技术画像');
@@ -196,6 +206,8 @@ export function listKnowledge() {
     if (!files.techChapters) missing.push('技术章节');
     if (!files.bizChapters) missing.push('商务章节');
     if (!files.history) missing.push('生成记录');
+    // v1.1.2：独立编制是可选项，只有索引里记了才检查
+    if (r.counts && r.counts.indep && !files.indep) missing.push('独立编制');
     return {
       ...r,
       files,
@@ -226,7 +238,8 @@ export function getKnowledge(pid) {
     record: rec,
     profiles: { tech: readProfile('tech', pid), biz: readProfile('biz', pid) },
     chapters: { tech: readChapters('tech', pid), biz: readChapters('biz', pid) },
-    history: readJson(path.join(DIR_HISTORY, pid + '.json'), null)
+    history: readJson(path.join(DIR_HISTORY, pid + '.json'), null),
+    indep: readJson(path.join(KB_DIR, '独立编制', pid + '.json'), null)
   };
 }
 
@@ -241,5 +254,6 @@ export function removeKnowledge(pid) {
     });
   });
   try { const h = path.join(DIR_HISTORY, pid + '.json'); if (fs.existsSync(h)) fs.unlinkSync(h); } catch {}
+  try { const d = path.join(KB_DIR, '独立编制', pid + '.json'); if (fs.existsSync(d)) fs.unlinkSync(d); } catch {}
   return { removed: before - idx.projects.length };
 }

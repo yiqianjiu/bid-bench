@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>独立编制 · 投标业务工作台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body class="indep-body">
+<div class="indep">
+  <header class="indep-head">
+    <div class="indep-title">
+      <b id="ipTitle">独立编制</b>
+      <span class="tag" id="ipRole">重要技术</span>
+      <span class="muted" id="ipProj"></span>
+    </div>
+    <div class="row" style="gap:8px">
+      <button class="btn tiny" id="ipEnv">环境自检</button>
+      <button class="btn tiny" id="ipClose">关闭窗口</button>
+    </div>
+  </header>
+
+  <div class="notice" id="ipNotice" hidden></div>
+
+  <div class="indep-wrap">
+    <section class="indep-left">
+      <div class="indep-lh">
+        <b>和 AI 说清楚要什么</b>
+        <span class="muted">例如：把第 3 部分写细一点 / 加一张进度甘特图 / 这段太空泛，补上具体人数和响应时间</span>
+      </div>
+      <div class="indep-msgs" id="ipMsgs"></div>
+      <div class="indep-input">
+        <textarea id="ipInput" rows="3" placeholder="在这里说话，回车发送（Shift+回车换行）"></textarea>
+        <div class="row" style="gap:8px">
+          <button class="btn primary" id="ipSend">发送</button>
+          <button class="btn" id="ipApply" title="让 AI 按上面的对话把稿子改一遍">执行更新</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="indep-right">
+      <div class="indep-rh">
+        <b>当前稿件</b>
+        <span class="muted" id="ipMeta"></span>
+        <div class="row" style="gap:8px;margin-left:auto">
+          <button class="btn tiny" id="ipGen">编制生成</button>
+          <button class="btn tiny" id="ipRedoAll">重新生成图表</button>
+        </div>
+      </div>
+      <textarea class="indep-text" id="ipText" placeholder="还没有内容。点「编制生成」，AI 会按招标文件要求和专家画像写一版；也可以直接在这里写。"></textarea>
+
+      <div class="indep-sub">
+        <b>建议配图</b>
+        <span class="muted">下面这些图由 AI 判断该放什么、说明什么问题，工作台在本机画出来（示意图）</span>
+      </div>
+      <div id="ipCharts" class="indep-charts"></div>
+
+      <div class="indep-sub">
+        <b>需要你补充的材料</b>
+        <span class="muted">照片、证书扫描件这类画不出来的，按提示自己放</span>
+      </div>
+      <div id="ipHints" class="indep-hints"></div>
+
+      <div class="indep-foot">
+        <div class="field" style="flex:1">
+          <label>导出位置（Word 存到这里）</label>
+          <input id="ipDir" placeholder="留空就用项目里的 03制作\\独立编制 文件夹">
+        </div>
+        <button class="btn" id="ipOpenDir">打开文件夹</button>
+        <button class="btn primary" id="ipExport">导出验收 Word</button>
+        <button class="btn" id="ipWriteBack" title="把这份稿子写回投标文件里这一章的正文">写回本章正文</button>
+      </div>
+      <div class="muted" id="ipMsg" style="font-size:12px;min-height:18px"></div>
+    </section>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script src="/indep.js"></script>
+</body>
+</html>

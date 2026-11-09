@@ -21,6 +21,9 @@ import { exportCheckDocx } from './lib/exportCheck.mjs';
 import { GROUPS, ensureSubmit, rebuildSubmit, saveSubmit, loadSubmit, ensureSubmitDirs } from './lib/submit.mjs';
 import { exportSubmitDocx } from './lib/exportSubmit.mjs';
 import { archiveProject, listArchives, rebuildKnowledgeFor } from './lib/archive.mjs';
+import { ensureProcDirs, appendProcess, loadProcess, copyProcessTo, pruneData } from './lib/process.mjs';
+import { ensureIndepDirs, ensureSession, loadSession, saveSession, listSessions, generateDraft, chatWithAI, applyUpdate, exportDraftWord, writeBack, defaultOutDir, redoChart, reworkChart, envCheck, clientSession, redoAllCharts } from './lib/indep.mjs';
+import { browserStatus } from './lib/chart.mjs';
 
 const cfg = loadConfig();
 ensureDirs();
@@ -30,6 +33,8 @@ ensureAnalysisDirs();
 ensureDraftDirs();
 ensureCheckDirs();
 ensureSubmitDirs();
+ensureProcDirs();
+ensureIndepDirs();
 
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -141,13 +146,15 @@ route('POST', '/api/projects', async (req, res) => {
   const name = String(body.name || '').trim() || '未命名项目';
   const dir = safeName(tenderCode ? tenderCode + '_' + shortName(name) : autoCode + '_' + shortName(name), id);
   const now = nowIso();
-  run(db, 'INSERT INTO projects (id, code, autoCode, name, owner, agency, budget, bidDeadline, openTime, openPlace, deposit, purchaseMethod, packageNo, company, notes, status, dir, createdAt, updatedAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+  const isBackfill = body.isBackfill ? '1' : '';
+  run(db, 'INSERT INTO projects (id, code, autoCode, name, owner, agency, budget, bidDeadline, openTime, openPlace, deposit, purchaseMethod, packageNo, company, notes, status, dir, createdAt, updatedAt, isBackfill) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
     id, tenderCode, autoCode, name, body.owner || '', body.agency || '', body.budget || '', body.bidDeadline || '', body.openTime || '',
     body.openPlace || '', body.deposit || '', body.purchaseMethod || '', body.packageNo || '', body.company || '',
-    body.notes || '', 'active', dir, now, now);
+    body.notes || '', 'active', dir, now, now, isBackfill);
   fs.mkdirSync(path.join(PROJECT_DIR, dir), { recursive: true });
   for (const sub of Object.values(STAGE_MAP)) fs.mkdirSync(path.join(PROJECT_DIR, dir, sub), { recursive: true });
-  addEvent(db, id, 'create', '新建项目 ' + name);
+  addEvent(db, id, 'create', '新建项目 ' + name + (isBackfill ? '（补录项目）' : ''));
+  appendProcess(id, { kind: 'create', title: '新建项目' + (isBackfill ? '（补录）' : ''), detail: name + (tenderCode ? ' / 编号 ' + tenderCode : '') });
   json(res, 200, { ok: true, id, autoCode, dir });
 });
 
@@ -157,7 +164,7 @@ route('GET', '/api/projects/:id', async (req, res, ctx) => {
   json(res, 200, p);
 });
 
-const EDITABLE = ['code', 'name', 'owner', 'agency', 'budget', 'bidDeadline', 'openTime', 'openPlace', 'deposit', 'purchaseMethod', 'packageNo', 'company', 'notes'];
+const EDITABLE = ['code', 'name', 'owner', 'agency', 'budget', 'bidDeadline', 'openTime', 'openPlace', 'deposit', 'purchaseMethod', 'packageNo', 'company', 'notes', 'isBackfill'];
 
 route('POST', '/api/projects/:id', async (req, res, ctx) => {
   const body = await readJson(req);
@@ -193,6 +200,7 @@ const TEXT_EXT = ['.pdf', '.docx', '.doc'];
 route('POST', '/api/projects/:id/files', async (req, res, ctx) => {
   const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.id);
   if (!p) return json(res, 404, { error: '项目不存在' });
+  if (p.status === 'archived') return json(res, 403, { error: '这个项目已经关闭归档了，只能查看。要修改请先点「重新打开」。', code: 'ARCHIVED_READONLY' });
   const stage = ctx.query.stage || 'tender';
   const role = ctx.query.role || 'tenderFile';
   const body = await readBody(req);
@@ -218,6 +226,7 @@ route('POST', '/api/projects/:id/files', async (req, res, ctx) => {
       insertFile(p.id, id, stage, role, origName, stored, rel, buf.length, sha256(buf));
       saved.push({ id, name: origName, size: buf.length, relPath: rel });
       addEvent(db, p.id, 'upload', '上传文件 ' + origName);
+  appendProcess(p.id, { kind: 'upload', title: '上传文件：' + origName, detail: (stage === 'tender' ? '招标文件' : '其他资料') + '，' + fmtSizeSoft(f.size) });
 
       // 压缩包：解压后把里面的文档一并登记
       if (ext === '.zip' || ext === '.rar' || ext === '.7z') {
@@ -393,6 +402,7 @@ route('POST', '/api/projects/:id/extract-meta', async (req, res, ctx) => {
     return json(res, 400, { error: String(e && e.message || e) });
   }
   addEvent(db, p.id, 'ai', '识别招标文件基本信息（' + f.originalName + '）');
+  appendProcess(p.id, { kind: 'ai', title: 'AI 识别招标文件基本信息', detail: f.originalName });
   json(res, 200, {
     ok: true, meta, fileId: f.id, fileName: f.originalName, visionPages: visionUsed,
     stats: { pages: work.pageCount, chars: work.chars }
@@ -747,6 +757,7 @@ route('POST', '/api/projects/:id/draft/:doc/restore-outline', async (req, res, c
   if (!ok) return json(res, 400, { error: '没有可恢复的自动框架（你还没上传过 Word）' });
   saveDraft(p.id, d);
   addEvent(db, p.id, 'draft', doc.title + ' 恢复为自动生成的框架');
+  appendProcess(p.id, { kind: 'draft', title: doc.title + ' 恢复自动框架', detail: '' });
   json(res, 200, { ok: true, chapters: doc.chapters.length - 2 });
 });
 
@@ -893,6 +904,7 @@ route('POST', '/api/projects/:id/check', async (req, res, ctx) => {
   if (!sources.length) return json(res, 400, { error: '没有可核查的文件。请先把做好的 Word/PDF 放到「投标文件」页，或在这里上传。' });
   const t = startCheckTask(p, sources, loadAnalysis(p.id));
   addEvent(db, p.id, 'check', '开始核查 ' + sources.length + ' 份文件');
+  appendProcess(p.id, { kind: 'check', title: '开始核查', detail: sources.length + ' 份文件：' + sources.map((s) => s.name).join('、') });
   json(res, 200, t);
 });
 
@@ -935,6 +947,7 @@ route('POST', '/api/projects/:id/submit/rebuild', async (req, res, ctx) => {
   if (!p) return json(res, 404, { error: '项目不存在' });
   const s = rebuildSubmit(p, loadAnalysis(p.id));
   addEvent(db, p.id, 'submit', '重新生成递交清单');
+  appendProcess(p.id, { kind: 'submit', title: '重新生成递交清单', detail: '' });
   json(res, 200, { ok: true, submit: s });
 });
 
@@ -989,16 +1002,63 @@ route('POST', '/api/projects/:id/submit/export', async (req, res, ctx) => {
 });
 
 // ---------- 模块6：项目关闭与归档 ----------
+// v1.1.2 关闭归档门禁：真实项目在投标截止时间之前不能关闭；
+// 补录项目（isBackfill）不受限制；真实项目确实要放弃投标时，用 mode='abandon' 显式走放弃通道。
+route('GET', '/api/projects/:id/close-status', async (req, res, ctx) => {
+  const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.id);
+  if (!p) return json(res, 404, { error: '项目不存在' });
+  json(res, 200, { ok: true, ...closeStatusOf(p) });
+});
+
+function closeStatusOf(p) {
+  const isBackfill = String(p.isBackfill || '') === '1';
+  const t = p.bidDeadline ? Date.parse(String(p.bidDeadline).replace(' ', 'T')) : NaN;
+  const hasDeadline = !Number.isNaN(t);
+  const passed = hasDeadline ? Date.now() >= t : true;
+  // 没填截止时间的老项目按「已过」处理，否则永远关不掉
+  const canClose = isBackfill || passed;
+  let reason = '';
+  if (!canClose) reason = '投标截止时间还没到（' + p.bidDeadline + '），不能关闭归档。';
+  else if (!hasDeadline) reason = '本项目没有填投标截止时间，按已结束处理。';
+  return {
+    canClose, isBackfill, hasDeadline, passed,
+    deadline: p.bidDeadline || '',
+    msLeft: hasDeadline ? t - Date.now() : 0,
+    reason, abandonAllowed: !isBackfill && !passed
+  };
+}
+
 route('POST', '/api/projects/:id/close', async (req, res, ctx) => {
   const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.id);
   if (!p) return json(res, 404, { error: '项目不存在' });
   if (p.status === 'archived') return json(res, 400, { error: '这个项目已经关闭归档了' });
   const body = await readJson(req);
+  const st = closeStatusOf(p);
+  const mode = String(body.mode || '');
+  if (!st.canClose && mode !== 'abandon') {
+    return json(res, 403, {
+      error: st.reason + '如果这个项目确实不投了，可以点「放弃投标，关闭归档」。',
+      code: 'DEADLINE_BLOCK', ...st
+    });
+  }
+  if (mode === 'abandon') {
+    const why = String(body.abandonReason || '').trim();
+    if (!why) return json(res, 400, { error: '放弃投标要写一句原因（方便以后复盘）。', code: 'NEED_REASON' });
+  }
+  if (String(body.confirmText || '') !== '关闭归档') {
+    return json(res, 400, { error: '请手动输入「关闭归档」四个字确认。', code: 'NEED_CONFIRM' });
+  }
   try {
-    const r = archiveProject(p, db, { note: body.note || '' });
-    run(db, 'UPDATE projects SET status = ?, closedAt = ?, archiveNote = ?, updatedAt = ? WHERE id = ?',
-      'archived', nowIso(), (body.note || '') + '||' + r.relDir, nowIso(), p.id);
-    addEvent(db, p.id, 'archive', '项目关闭并归档到 ' + r.relDir);
+    const r = archiveProject(p, db, { note: body.note || '', sessions: listSessions(p.id) });
+    const closedBy = mode === 'abandon' ? 'abandon' : 'normal';
+    run(db, 'UPDATE projects SET status = ?, closedAt = ?, archiveNote = ?, closedBy = ?, abandonReason = ?, updatedAt = ? WHERE id = ?',
+      'archived', nowIso(), (body.note || '') + '||' + r.relDir, closedBy, mode === 'abandon' ? String(body.abandonReason || '') : '', nowIso(), p.id);
+    addEvent(db, p.id, 'archive', (mode === 'abandon' ? '放弃投标，关闭归档到 ' : '项目关闭并归档到 ') + r.relDir);
+    appendProcess(p.id, {
+      kind: 'archive',
+      title: mode === 'abandon' ? '放弃投标，关闭归档' : '关闭归档',
+      detail: (body.note || '') + (mode === 'abandon' ? '\n放弃原因：' + body.abandonReason : '') + '\n归档目录：' + r.relDir + '\n文件数：' + r.files
+    });
     json(res, 200, {
       ok: true, dir: r.dir, relDir: r.relDir, files: r.files,
       knowledge: r.knowledge || null,
@@ -1067,6 +1127,218 @@ function splitByHeading(text) {
   return out.filter((x) => x.body.length > 20);
 }
 
+// ---------- v1.1.2 独立编制（重要技术 / 重要商务章节） ----------
+function fmtSizeSoft(n) {
+  const b = Number(n) || 0;
+  if (b > 1024 * 1024) return (b / 1024 / 1024).toFixed(1) + ' MB';
+  if (b > 1024) return Math.round(b / 1024) + ' KB';
+  return b + ' B';
+}
+function needProject(id) {
+  const p = get(db, 'SELECT * FROM projects WHERE id = ?', id);
+  if (!p) { const e = new Error('项目不存在'); e.status = 404; throw e; }
+  return p;
+}
+function guardArchived(p) {
+  if (p.status === 'archived') { const e = new Error('这个项目已经关闭归档了，只能查看。要修改请先点「重新打开」。'); e.status = 403; e.code = 'ARCHIVED_READONLY'; throw e; }
+}
+function indepChapter(p, docKey, cid) {
+  const d = loadDraft(p.id);
+  if (!d || !d.docs || !d.docs[docKey]) { const e = new Error('还没生成投标文件框架'); e.status = 400; throw e; }
+  const c = (d.docs[docKey].chapters || []).find((x) => x.id === cid);
+  if (!c) { const e = new Error('章节不存在'); e.status = 404; throw e; }
+  return { draft: d, chapter: c };
+}
+
+route('GET', '/api/projects/:id/draft/:doc/chapter/:cid/indep', async (req, res, ctx) => {
+  const p = needProject(ctx.params.id);
+  const { chapter } = indepChapter(p, ctx.params.doc, ctx.params.cid);
+  const s2 = ensureSession(p, ctx.params.doc, chapter);
+  const analysis = readAnalysis(p.id);
+  json(res, 200, {
+    ok: true, session: clientSession(s2), chapter: { id: chapter.id, title: chapter.title, role: chapter.role || '', body: chapter.body || '' },
+    outDir: s2.outDir || defaultOutDir(p), browser: browserStatus(),
+    hasAnalysis: !!analysis, apiReady: apiReady()
+  });
+});
+
+route('POST', '/api/projects/:id/draft/:doc/chapter/:cid/indep/save', async (req, res, ctx) => {
+  const p = needProject(ctx.params.id);
+  guardArchived(p);
+  const { chapter } = indepChapter(p, ctx.params.doc, ctx.params.cid);
+  const body = await readJson(req);
+  const s2 = ensureSession(p, ctx.params.doc, chapter);
+  if (typeof body.text === 'string') s2.text = body.text;
+  if (Array.isArray(body.charts)) {
+    // 只接受已有图的元信息，png 路径以服务端为准，避免前端乱写路径
+    const byId = new Map((s2.charts || []).map((c) => [c.id, c]));
+    s2.charts = body.charts.map((c) => {
+      const old = byId.get(c.id);
+      if (!old) return null;
+      return { ...old, title: c.title || old.title, caption: c.caption || old.caption, afterText: c.afterText || old.afterText };
+    }).filter(Boolean);
+  }
+  if (Array.isArray(body.hints)) s2.hints = body.hints.slice(0, 40).map((h) => ({ afterText: String(h.afterText || ''), text: String(h.text || '').slice(0, 800) }));
+  s2.updatedAt = new Date().toISOString();
+  saveSession(s2);
+  json(res, 200, { ok: true, chars: (s2.text || '').length });
+});
+
+route('POST', '/api/projects/:id/draft/:doc/chapter/:cid/indep/generate', async (req, res, ctx) => {
+  const p = needProject(ctx.params.id);
+  guardArchived(p);
+  const { chapter } = indepChapter(p, ctx.params.doc, ctx.params.cid);
+  const body = await readJson(req);
+  const s2 = ensureSession(p, ctx.params.doc, chapter);
+  if (body.extra) s2.lastExtra = String(body.extra).slice(0, 4000);
+  try {
+    const out = await generateDraft(p, s2, readAnalysis(p.id), s2.lastExtra || '');
+    appendProcess(p.id, { kind: 'indep', title: '独立编制生成：' + chapter.title, detail: '字数 ' + String(out.text || '').length + '，图 ' + (out.charts || []).length + ' 张' });
+    json(res, 200, { ok: true, session: clientSession(out) });
+  } catch (e) {
+    json(res, 500, { error: String(e && e.message || e) });
+  }
+});
+
+route('POST', '/api/projects/:id/draft/:doc/chapter/:cid/indep/chat', async (req, res, ctx) => {
+  const p = needProject(ctx.params.id);
+  guardArchived(p);
+  const { chapter } = indepChapter(p, ctx.params.doc, ctx.params.cid);
+  const body = await readJson(req);
+  const msg = String(body.message || '').trim();
+  if (!msg) return json(res, 400, { error: '说点什么再发。' });
+  const s2 = ensureSession(p, ctx.params.doc, chapter);
+  try {
+    const r = await chatWithAI(p, s2, readAnalysis(p.id), msg);
+    json(res, 200, { ok: true, reply: r.reply, session: clientSession(r.session) });
+  } catch (e) {
+    json(res, 500, { error: String(e && e.message || e) });
+  }
+});
+
+route('POST', '/api/projects/:id/draft/:doc/chapter/:cid/indep/update', async (req, res, ctx) => {
+  const p = needProject(ctx.params.id);
+  guardArchived(p);
+  const { chapter } = indepChapter(p, ctx.params.doc, ctx.params.cid);
+  const s2 = ensureSession(p, ctx.params.doc, chapter);
+  try {
+    const out = await applyUpdate(p, s2, readAnalysis(p.id));
+    appendProcess(p.id, { kind: 'indep', title: '独立编制执行更新：' + chapter.title, detail: '字数 ' + String(out.text || '').length });
+    json(res, 200, { ok: true, session: clientSession(out) });
+  } catch (e) {
+    json(res, 500, { error: String(e && e.message || e) });
+  }
+});
+
+route('POST', '/api/projects/:id/draft/:doc/chapter/:cid/indep/chart/:chartId', async (req, res, ctx) => {
+  const p = needProject(ctx.params.id);
+  guardArchived(p);
+  const { chapter } = indepChapter(p, ctx.params.doc, ctx.params.cid);
+  const body = await readJson(req);
+  try {
+    const s2 = ensureSession(p, ctx.params.doc, chapter);
+    const out = body.instruction
+      ? await reworkChart(p, s2, ctx.params.chartId, String(body.instruction))
+      : await redoChart(p.id, ctx.params.cid, ctx.params.chartId, body);
+    json(res, 200, { ok: true, session: clientSession(out) });
+  } catch (e) {
+    json(res, 500, { error: String(e && e.message || e) });
+  }
+});
+
+route('POST', '/api/projects/:id/draft/:doc/chapter/:cid/indep/redocharts', async (req, res, ctx) => {
+  const p = needProject(ctx.params.id);
+  guardArchived(p);
+  const { chapter } = indepChapter(p, ctx.params.doc, ctx.params.cid);
+  try {
+    ensureSession(p, ctx.params.doc, chapter);
+    const out = await redoAllCharts(p.id, ctx.params.cid);
+    appendProcess(p.id, { kind: 'indep', title: '独立编制重画图表：' + chapter.title, detail: '共 ' + out.results.length + ' 张，失败 ' + out.results.filter((x) => !x.ok).length + ' 张' });
+    json(res, 200, { ok: true, session: clientSession(out.session), results: out.results });
+  } catch (e) {
+    json(res, 500, { error: String((e && e.message) || e) });
+  }
+});
+
+route('GET', '/api/indep-image/:pid/:cid/:name', async (req, res, ctx) => {
+  const f = path.join(DATA_DIR, '独立编制', ctx.params.pid, safeName(ctx.params.cid), path.basename(ctx.params.name));
+  if (!f.startsWith(path.join(DATA_DIR, '独立编制')) || !fs.existsSync(f)) { res.writeHead(404); return res.end('not found'); }
+  res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-cache' });
+  fs.createReadStream(f).pipe(res);
+});
+
+route('POST', '/api/projects/:id/draft/:doc/chapter/:cid/indep/export', async (req, res, ctx) => {
+  const p = needProject(ctx.params.id);
+  const { chapter } = indepChapter(p, ctx.params.doc, ctx.params.cid);
+  const body = await readJson(req);
+  const s2 = ensureSession(p, ctx.params.doc, chapter);
+  const outDir = body.dir ? path.resolve(String(body.dir)) : defaultOutDir(p);
+  try {
+    if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+    const r = await exportDraftWord(p, s2, outDir);
+    addEvent(db, p.id, 'export', '独立编制导出 ' + path.basename(r.file));
+    appendProcess(p.id, { kind: 'export', title: '独立编制导出 Word', detail: r.file });
+    json(res, 200, { ok: true, ...r });
+  } catch (e) {
+    json(res, 500, { error: '导出失败：' + String(e && e.message || e) });
+  }
+});
+
+route('POST', '/api/projects/:id/draft/:doc/chapter/:cid/indep/writeback', async (req, res, ctx) => {
+  const p = needProject(ctx.params.id);
+  guardArchived(p);
+  const { draft, chapter } = indepChapter(p, ctx.params.doc, ctx.params.cid);
+  const s2 = ensureSession(p, ctx.params.doc, chapter);
+  if (!s2.text || s2.text.length < 40) return json(res, 400, { error: '还没有生成内容，写不回去。' });
+  try {
+    writeBack(s2, draft, ctx.params.doc);
+    saveDraft(p.id, draft);
+    addEvent(db, p.id, 'draft', '独立编制写回正文：' + chapter.title);
+    appendProcess(p.id, { kind: 'indep', title: '独立编制写回正文：' + chapter.title, detail: '字数 ' + s2.text.length });
+    json(res, 200, { ok: true, chars: s2.text.length });
+  } catch (e) {
+    json(res, 500, { error: String(e && e.message || e) });
+  }
+});
+
+route('POST', '/api/projects/:id/draft/:doc/chapter/:cid/indep/outdir', async (req, res, ctx) => {
+  const p = needProject(ctx.params.id);
+  const { chapter } = indepChapter(p, ctx.params.doc, ctx.params.cid);
+  const body = await readJson(req);
+  const s2 = ensureSession(p, ctx.params.doc, chapter);
+  s2.outDir = body.dir ? path.resolve(String(body.dir)) : '';
+  saveSession(s2);
+  json(res, 200, { ok: true, outDir: s2.outDir || defaultOutDir(p) });
+});
+
+// ---------- v1.1.2 过程记录 / 环境自检 / 数据清理 ----------
+route('GET', '/api/projects/:id/process', async (req, res, ctx) => {
+  const p = needProject(ctx.params.id);
+  json(res, 200, { ok: true, ...loadProcess(p.id) });
+});
+
+route('POST', '/api/projects/:id/process', async (req, res, ctx) => {
+  const p = needProject(ctx.params.id);
+  guardArchived(p);
+  const body = await readJson(req);
+  if (!body.title) return json(res, 400, { error: '标题不能为空' });
+  appendProcess(p.id, { kind: body.kind || 'note', title: body.title, detail: body.detail || '' });
+  json(res, 200, { ok: true });
+});
+
+route('GET', '/api/env-check', async (req, res) => {
+  try { json(res, 200, { ok: true, items: await envCheck() }); }
+  catch (e) { json(res, 500, { error: String(e && e.message || e) }); }
+});
+
+route('POST', '/api/maintenance/prune', async (req, res) => {
+  const body = await readJson(req);
+  try {
+    const r = pruneData({ keepBak: Number(body.keepBak) || 3, keepConv: Number(body.keepConv) || 2 });
+    json(res, 200, { ok: true, ...r });
+  } catch (e) { json(res, 500, { error: String(e && e.message || e) }); }
+});
+
 // ---------- 静态文件 ----------
 function serveStatic(req, res, urlPath) {
   if (urlPath === '/') urlPath = '/index.html';
@@ -1075,6 +1347,19 @@ function serveStatic(req, res, urlPath) {
   if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end('not found'); return; }
   res.writeHead(200, { 'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
   fs.createReadStream(file).pipe(res);
+}
+
+// 归档只读：除这些动作外，归档项目上的一切写操作都拒绝
+const RO_ALLOW = [
+  /^\/api\/projects\/[^/]+\/reopen$/,
+  /\/export$/,            // 导出报告/Word/清单照常可用
+  /\/indep\/export$/      // 独立编制导出 Word 照常可用
+];
+function readOnlyBlock(method, pathname, pid) {
+  const p = get(db, 'SELECT status FROM projects WHERE id = ?', pid);
+  if (!p || p.status !== 'archived') return null;
+  if (RO_ALLOW.some((rx) => rx.test(pathname))) return null;
+  return { error: '这个项目已经关闭归档了，只能查看。要修改请先点「重新打开」。', code: 'ARCHIVED_READONLY' };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -1088,11 +1373,17 @@ const server = http.createServer(async (req, res) => {
     if (!m) continue;
     const params = {};
     r.keys.forEach((k, i) => { params[k] = decodeURIComponent(m[i + 1]); });
+    // v1.1.2：归档后的项目一律只读（查看/导出/打开文件夹/重新打开除外）
+    if (req.method !== 'GET' && params.id && params.id.startsWith('p_')) {
+      const ro = readOnlyBlock(req.method, pathname, params.id);
+      if (ro) return json(res, 403, ro);
+    }
     try {
       return await r.handler(req, res, { params, query });
     } catch (e) {
       console.error(e);
-      if (!res.headersSent) return json(res, 500, { error: String(e && e.message || e) });
+      const code = Number(e && e.status) || 500;
+      if (!res.headersSent) return json(res, code, { error: String(e && e.message || e), code: (e && e.code) || '' });
       try { res.end(); } catch {}
       return;
     }
