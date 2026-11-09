@@ -11,7 +11,9 @@ import { callJson, apiReady } from './lib/ai.mjs';
 import { SYSTEM_META, metaUserPrompt, SECTIONS } from './lib/prompt.mjs';
 import { startAnalysis, getTask, loadAnalysis, saveAnalysis, runningTaskOf, ensureAnalysisDirs } from './lib/analyze.mjs';
 import { exportAnalysisDocx } from './lib/exportAnalysis.mjs';
-import { ensureDraft, saveDraft, setMode, refreshTables, startOutlineTask, startChapterTask, getDraftTask, DOC_META, ensureDraftDirs, applyUploadedOutline, restoreAutoOutline } from './lib/draft.mjs';
+import { ensureDraft, saveDraft, loadDraft, setMode, refreshTables, startOutlineTask, startChapterTask, getDraftTask, DOC_META, ensureDraftDirs, applyUploadedOutline, restoreAutoOutline, reviewRoles, setChapterRole } from './lib/draft.mjs';
+import { generateProfile, getProfile, confirmProfile, loadProfiles, profileHeadline, blankProfile, PROFILE_KINDS, KIND_LABEL } from './lib/profile.mjs';
+import { listKnowledge, getKnowledge, removeKnowledge, buildReferenceBlock, findSimilar } from './lib/knowledge.mjs';
 import { parseDocxOutline } from './lib/docxOutline.mjs';
 import { exportDraftDocx } from './lib/exportDraft.mjs';
 import { loadCheck, saveCheck, listSources, startCheckTask, getCheckTask, ensureCheckDirs } from './lib/check.mjs';
@@ -748,6 +750,110 @@ route('POST', '/api/projects/:id/draft/:doc/restore-outline', async (req, res, c
   json(res, 200, { ok: true, chapters: doc.chapters.length - 2 });
 });
 
+
+// ---------- v1.1.0：章节性质标识（重要技术 / 重要商务） ----------
+// AI 复核整份文件的章节性质（规则粗判已在前端展示，这里用 AI 校正一次）
+route('POST', '/api/projects/:id/draft/:doc/review-roles', async (req, res, ctx) => {
+  const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.id);
+  if (!p) return json(res, 404, { error: '项目不存在' });
+  if (!apiReady()) return json(res, 400, { error: '还没有设置 DeepSeek API Key，请先到设置里填写' });
+  const d = ensureDraft(p.id);
+  const doc = d.docs[ctx.params.doc];
+  if (!doc) return json(res, 404, { error: '这份文件还没有生成框架' });
+  const r = await reviewRoles(doc);
+  saveDraft(p.id, d);
+  const counts = { tech: 0, biz: 0, none: 0 };
+  (doc.chapters || []).forEach((c) => { if (c.role === 'tech') counts.tech++; else if (c.role === 'biz') counts.biz++; else counts.none++; });
+  addEvent(db, p.id, 'draft', doc.title + ' AI 复核章节性质：重要技术 ' + counts.tech + ' 章、重要商务 ' + counts.biz + ' 章');
+  json(res, 200, { ok: true, changed: r.changed || 0, counts, error: r.error || '' });
+});
+
+// 手动切换某一章的性质：tech → biz → 空 → tech
+route('PUT', '/api/projects/:id/draft/:doc/chapter/:cid/role', async (req, res, ctx) => {
+  const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.id);
+  if (!p) return json(res, 404, { error: '项目不存在' });
+  const body = await readJson(req);
+  const d = ensureDraft(p.id);
+  const doc = d.docs[ctx.params.doc];
+  if (!doc) return json(res, 404, { error: '这份文件还没有生成框架' });
+  const c = setChapterRole(doc, ctx.params.cid, body.role || '');
+  if (!c) return json(res, 404, { error: '章节不存在' });
+  saveDraft(p.id, d);
+  json(res, 200, { ok: true, role: c.role, roleBy: c.roleBy });
+});
+
+// ---------- v1.1.0：专家画像 ----------
+function profileView(pid) {
+  const all = loadProfiles(pid);
+  const out = {};
+  PROFILE_KINDS.forEach((k) => {
+    const rec = all[k];
+    out[k] = rec ? { kind: k, label: KIND_LABEL[k], confirmed: !!rec.confirmed, confirmedAt: rec.confirmedAt || '', generatedAt: rec.generatedAt || '', data: rec.data || blankProfile(k), headline: profileHeadline(k, rec.data || {}) } : null;
+  });
+  return out;
+}
+
+route('GET', '/api/projects/:id/profiles', async (req, res, ctx) => {
+  const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.id);
+  if (!p) return json(res, 404, { error: '项目不存在' });
+  json(res, 200, { ok: true, profiles: profileView(p.id) });
+});
+
+// 生成画像（不确认，先给用户看）
+route('POST', '/api/projects/:id/profiles/:kind/generate', async (req, res, ctx) => {
+  const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.id);
+  if (!p) return json(res, 404, { error: '项目不存在' });
+  if (!apiReady()) return json(res, 400, { error: '还没有设置 DeepSeek API Key，请先到设置里填写' });
+  const kind = ctx.params.kind === 'biz' ? 'biz' : 'tech';
+  const an = loadAnalysis(p.id);
+  if (!an) return json(res, 400, { error: '还没有招标分析结果，请先完成招标文件分析（AI 需要先读懂招标文件才能建立画像）' });
+  try {
+    const refs = findSimilar(p, kind, 3);
+    const prof = await generateProfile(p, an, kind, refs);
+    const { setProfileDraft } = await import('./lib/profile.mjs');
+    setProfileDraft(p.id, kind, prof, { refsUsed: (refs || []).map((r) => ({ projectId: r.projectId, name: r.name })) });
+    json(res, 200, { ok: true, kind, label: KIND_LABEL[kind], profile: prof, headline: profileHeadline(kind, prof), refsUsed: (refs || []).length });
+  } catch (e) {
+    json(res, 500, { error: '画像生成失败：' + String(e && e.message || e) });
+  }
+});
+
+// 确认画像（可带用户修改后的内容）
+route('PUT', '/api/projects/:id/profiles/:kind', async (req, res, ctx) => {
+  const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.id);
+  if (!p) return json(res, 404, { error: '项目不存在' });
+  const body = await readJson(req);
+  const kind = ctx.params.kind === 'biz' ? 'biz' : 'tech';
+  const prev = getProfile(p.id, kind);
+  const data = body.data && typeof body.data === 'object' ? body.data : (prev && prev.data) || blankProfile(kind);
+  if (body.confirm === false) {
+    const { setProfileDraft } = await import('./lib/profile.mjs');
+    setProfileDraft(p.id, kind, data);
+    return json(res, 200, { ok: true, confirmed: false });
+  }
+  const changed = prev && prev.data ? JSON.stringify(prev.data) !== JSON.stringify(data) : false;
+  confirmProfile(p.id, kind, data, { revisionNote: changed ? (body.note || '操作人员确认前修改了画像内容') : '' });
+  addEvent(db, p.id, 'draft', '确认' + KIND_LABEL[kind] + '专家画像' + (changed ? '（已人工修改）' : ''));
+  json(res, 200, { ok: true, confirmed: true, changed, profile: profileView(p.id)[kind] });
+});
+
+// ---------- v1.1.0：专家知识库 ----------
+route('GET', '/api/knowledge', async (req, res, ctx) => {
+  try { json(res, 200, { ok: true, ...listKnowledge() }); }
+  catch (e) { json(res, 500, { error: String(e && e.message || e) }); }
+});
+
+route('GET', '/api/knowledge/:pid', async (req, res, ctx) => {
+  const k = getKnowledge(ctx.params.pid);
+  if (!k) return json(res, 404, { error: '知识库里没有这个项目' });
+  json(res, 200, { ok: true, ...k });
+});
+
+route('DELETE', '/api/knowledge/:pid', async (req, res, ctx) => {
+  const ok = removeKnowledge(ctx.params.pid);
+  json(res, 200, { ok: !!ok });
+});
+
 // ---------- 模块4：投标文件核查 ----------
 route('GET', '/api/projects/:id/check', async (req, res, ctx) => {
   const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.id);
@@ -880,7 +986,7 @@ route('POST', '/api/projects/:id/close', async (req, res, ctx) => {
     run(db, 'UPDATE projects SET status = ?, closedAt = ?, archiveNote = ?, updatedAt = ? WHERE id = ?',
       'archived', nowIso(), (body.note || '') + '||' + r.relDir, nowIso(), p.id);
     addEvent(db, p.id, 'archive', '项目关闭并归档到 ' + r.relDir);
-    json(res, 200, { ok: true, dir: r.dir, relDir: r.relDir, files: r.files });
+    json(res, 200, { ok: true, dir: r.dir, relDir: r.relDir, files: r.files, knowledge: r.knowledge || null });
   } catch (e) {
     json(res, 500, { error: '归档失败：' + String(e && e.message || e) });
   }

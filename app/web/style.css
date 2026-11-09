@@ -355,3 +355,56 @@ label.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 1
 .ck-src-more summary:hover { color:#1a56db; }
 .ck-src-more .ck-src-list { margin-top:4px; }
 .tag-gray { background:#eef1f5; color:#5b6472; }
+
+/* ================= v1.1.0：章节性质标签 / 专家画像 / 知识库 ================= */
+.tag.role-tech { background: #e3efff; color: #1a56c4; border: 1px solid #b9d4ff; }
+.tag.role-biz { background: #f2e9ff; color: #6b3fb8; border: 1px solid #d9c8f7; }
+.tag.role-none { background: #f3f4f6; color: #8a9099; border: 1px dashed #d6d9de; }
+[data-rolebtn] { cursor: pointer; user-select: none; }
+[data-rolebtn]:hover { filter: brightness(0.96); }
+
+.df-rolebar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px;
+  padding: 8px 10px; border-radius: 8px; margin-bottom: 10px; line-height: 1.6; }
+.df-rolebar.is-tech { background: #f0f6ff; border: 1px solid #cfe0ff; color: #1a3f7a; }
+.df-rolebar.is-biz { background: #f8f2ff; border: 1px solid #e3d3fb; color: #53308f; }
+.df-rolebar a { color: inherit; text-decoration: underline; cursor: pointer; font-weight: 600; }
+
+.pf-head { background: #f7f9fc; border-left: 3px solid #2f6bff; padding: 10px 12px; border-radius: 6px;
+  font-size: 14px; line-height: 1.7; color: #26303d; }
+
+.btn.kb { background: #f4f0ff; color: #5b34b0; border: 1px solid #ddd0f7; font-weight: 600; }
+.btn.kb:hover { background: #ece4ff; }
+
+.kb-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+.kb-i { background: #fff; border: 1px solid #e5e8ee; border-radius: 10px; padding: 14px; cursor: pointer; }
+.kb-i:hover { border-color: #c9d4e6; box-shadow: 0 2px 10px rgba(20,40,80,.06); }
+.kb-h { display: flex; align-items: center; gap: 8px; justify-content: space-between; margin-bottom: 6px; }
+.kb-h b { font-size: 15px; }
+.kb-m { color: #6b7280; font-size: 13px; margin-bottom: 8px; }
+.kb-c { display: flex; gap: 14px; font-size: 13px; color: #4b5563; margin-bottom: 10px; flex-wrap: wrap; }
+.kb-c b { color: #111827; }
+.kb-a { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.kb-a .muted { margin-right: auto; font-size: 12px; }
+.kb-sec { margin-bottom: 14px; }
+.kb-sec-h { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.kb-ch { border-top: 1px solid #eef1f5; padding: 6px 0; }
+.kb-ch summary { cursor: pointer; font-size: 14px; padding: 4px 0; }
+.kb-body { white-space: pre-wrap; font-family: inherit; font-size: 13px; line-height: 1.75;
+  background: #fafbfd; border: 1px solid #eef1f5; border-radius: 6px; padding: 10px; margin: 6px 0 0; max-height: 420px; overflow: auto; }
+
+/* 未标注章节：平时不显示，鼠标移到这一行才露出提示 */
+.tag.role-none { opacity: 0; transition: opacity .15s; }
+.df-ch:hover .tag.role-none, .tag.role-none:hover { opacity: 1; }
+
+/* 章节性质汇总条 */
+.df-rolebar-sum { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 10px;
+  background: #fff; border: 1px solid #e5e8ee; border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+.df-rolebar-sum .muted { line-height: 1.6; }
+.pf-list { margin: 4px 0 0 18px; padding: 0; font-size: 13px; line-height: 1.8; color: #4b5563; }
+.pf-list li { margin: 0; }
+
+/* 知识库顶部统计条 */
+.kb-stat { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; background: #fff; border: 1px solid #e5e8ee;
+  border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; font-size: 13px; color: #4b5563; }
+.kb-stat b { color: #111827; font-size: 14px; }
+.kb-stat .muted { margin-left: auto; font-size: 12px; }

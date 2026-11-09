@@ -20,6 +20,12 @@ const TABS = [
 
 /* ---------- 小工具 ---------- */
 const $ = (s, root) => (root || document).querySelector(s);
+// 数据根目录（来自 /api/health 的 root），用于界面上显示文件保存位置；不写死盘符
+function rootPath() {
+  const r = (S.health && S.health.root) || '';
+  return String(r).replace(/[\\/]+$/, '');
+}
+
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 function toast(msg, isErr) {
@@ -592,7 +598,7 @@ async function exportAnalysis() {
     const r = await api('POST', '/api/projects/' + S.cur.id + '/analysis/export', {});
     toast('已生成：' + r.fileName);
     openModal('<h3>已生成 Word 文件</h3><p>文件已保存到项目文件夹里：</p>' +
-      '<div class="card" style="background:#f7f9fc"><code style="font-size:13px">D:\\投标工作台\\' + esc(r.relPath.replace(/\//g, '\\')) + '</code></div>' +
+      '<div class="card" style="background:#f7f9fc"><code style="font-size:13px">' + esc(rootPath() + '\\' + r.relPath.replace(/\//g, '\\')) + '</code></div>' +
       '<div class="modal-foot"><button class="btn" data-close>关闭</button>' +
       '<a class="btn primary" href="/api/download?path=' + encodeURIComponent(r.relPath) + '">下载这份 Word</a></div>');
   } catch (e) { toast(e.message, true); }
@@ -917,7 +923,7 @@ async function settingsDialog() {
       '<div class="hint">不填也能用工作台的整理和归档功能，只是没有 AI 识别与分析。</div></div>' +
     '<div class="field"><label>模型</label><input id="stModel" value="' + esc(s.deepseekModel || 'deepseek-flash') + '"></div>' +
     '<div class="field"><label>投标单位名称</label><input id="stCompany" value="' + esc(s.company || '') + '" placeholder="用于标书封面，可留空"></div>' +
-    '<div class="field full"><label>数据位置</label><input value="D:\\投标工作台" readonly></div>' +
+    '<div class="field full"><label>数据位置</label><input value="' + esc(rootPath()) + '" readonly></div>' +
     '</div><div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okSet">保存</button></div>');
   $('#okSet').onclick = async () => {
     const body = { deepseekModel: $('#stModel').value.trim(), company: $('#stCompany').value.trim() };
@@ -952,6 +958,14 @@ const TYPE_TAG = {
   normal: ''
 };
 
+// v1.1.0：章节性质标签（重要技术=蓝、重要商务=紫、其它不显示），点一下循环切换
+const ROLE_TAG = {
+  tech: '<span class="tag role-tech" data-rolebtn="1">重要技术</span>',
+  biz: '<span class="tag role-biz" data-rolebtn="1">重要商务</span>'
+};
+const ROLE_NEXT = { tech: 'biz', biz: '', '': 'tech' };
+const ROLE_NAME = { tech: '重要技术', biz: '重要商务', '': '不标注' };
+
 function dfLoading() { return '<div class="placeholder"><span class="loading"></span> 正在读取投标文件…</div>'; }
 
 async function loadDraftFor(pid) {
@@ -971,6 +985,8 @@ async function loadDraftFor(pid) {
     doc: keepDoc && d.draft.docs[keepDoc] && (d.draft.mode !== 'merged' || keepDoc === 'merged') ? keepDoc : (d.draft.docs[firstKey] ? firstKey : Object.keys(d.draft.docs)[0]),
     openChapter: keepOpen, redOnly: false
   };
+  // v1.1.0：把项目级专家画像一并读进来，章节面板才能显示「已确认 / 还没确认」
+  if (!S.pf || S.pf.projectId !== pid) { try { await loadProfilesFor(pid); } catch {} }
   if (S.cur && S.cur.id === pid && S.tab === 'draft') renderProject();
 }
 
@@ -996,6 +1012,19 @@ function viewDraft() {
       ? '索引表、偏离表会自动按招标分析结果填好，你只需要补「我方响应位置」的页码。'
       : '还没做招标分析，索引表和偏离表会是空的。建议先回「招标分析」页签做一次分析。') + '</div>' +
     '</div>';
+
+  /* 章节性质汇总条（v1.1.0） */
+  const normalCh = (cur0.chapters || []).filter((c) => c.type === 'normal');
+  const nTech = normalCh.filter((c) => c.role === 'tech').length;
+  const nBiz = normalCh.filter((c) => c.role === 'biz').length;
+  const roleBar = normalCh.length
+    ? '<div class="df-rolebar-sum">' +
+        '<span class="muted">章节性质：</span>' +
+        '<span class="tag role-tech">重要技术 ' + nTech + ' 章</span>' +
+        '<span class="tag role-biz">重要商务 ' + nBiz + ' 章</span>' +
+        '<span class="muted" style="font-size:12px">蓝/紫标签的章节，AI 会用「技术专家 / 商务专家」模式写；标错了点一下标签就能改（技术 → 商务 → 不标注）。鼠标移到章节行右侧会出现「＋ 重要」。</span>' +
+      '</div>'
+    : '';
 
   /* 左：文件清单 */
   const left = '<div class="df-docs">' + keys.map((k) => {
@@ -1042,8 +1071,15 @@ function viewDraft() {
       const titleCls = useOrig && !origNo ? ' df-ch-t-part' : '';
       const typeTag = TYPE_TAG[c.type] || '';
       const typeTagText = typeTag.replace(/<[^>]+>/g, '');
+      // 已标注的显示蓝/紫标签；没标注的平时不显示，鼠标移到这一行才露出淡灰「+ 重要」提示，点它即可标注
+      const roleTag = c.type === 'normal'
+        ? (c.role === 'tech' || c.role === 'biz'
+          ? '<span class="tag ' + (c.role === 'tech' ? 'role-tech' : 'role-biz') + '" data-rolebtn="' + c.id + '" title="点一下切换：重要技术 → 重要商务 → 不标注">' +
+            (c.role === 'tech' ? '重要技术' : '重要商务') + '</span>'
+          : '<span class="tag role-none" data-rolebtn="' + c.id + '" title="标为重要内容，AI 会按技术/商务专家模式写">＋ 重要</span>')
+        : '';
       const main = '<div class="df-ch-main" data-ch="' + c.id + '" data-go="open" style="padding-left:' + pad + 'px">' +
-        '<div class="df-ch-t' + titleCls + '">' + esc(numTxt + c.title) + ' ' + (typeTagText && typeTagText !== c.title ? typeTag : '') + ' ' + srcTag + '</div>' +
+        '<div class="df-ch-t' + titleCls + '">' + esc(numTxt + c.title) + ' ' + (typeTagText && typeTagText !== c.title ? typeTag : '') + ' ' + roleTag + ' ' + srcTag + '</div>' +
         '<div class="df-ch-s">' + esc(c.hint || '') + '</div></div>' +
         '<div class="df-ch-n">' + cnt + '</div>' +
         '<div class="df-ch-a">' + actions +
@@ -1057,6 +1093,7 @@ function viewDraft() {
       '<div><b>' + esc(cur0.title) + '</b> <span class="muted" style="font-size:13px">共 ' + cur0.chapters.length + ' 章</span></div>' +
       '<div class="row" style="gap:8px">' +
         '<button class="btn" id="btnAddCh">＋加一章</button>' +
+        '<button class="btn" id="btnReviewRoles" title="让 AI 把每章重新判一遍属于重要技术还是重要商务">AI 复核章节性质</button>' +
         '<button class="btn" id="btnRefreshTables">刷新索引/偏离表</button>' +
         '<button class="btn" id="btnImport">上传我写的 Word</button>' +
         (cur0.source === 'upload' ? '<button class="btn" id="btnRestoreOutline">恢复自动框架</button>' : '') +
@@ -1068,7 +1105,7 @@ function viewDraft() {
       '<div class="df-chs">' + rows + '</div>';
   }
 
-  return head + '<div class="df-wrap">' + left + '<div class="df-main">' + right + '</div></div>';
+  return head + roleBar + '<div class="df-wrap">' + left + '<div class="df-main">' + right + '</div></div>';
 }
 
 function chapterPanel(doc, c) {
@@ -1098,7 +1135,17 @@ function chapterPanel(doc, c) {
       '<button class="btn" data-close-ch="' + c.id + '">收起</button></div></div>';
   }
   const srcHint = c.source === 'upload' ? '<span class="tag blue">来自你上传的 Word</span>' : c.source === 'ai' ? '<span class="tag green">AI 生成</span>' : c.source === 'manual' ? '<span class="tag">手工填写</span>' : '';
-  return '<div class="df-panel"><div class="df-panel-h"><b>' + esc(c.title) + '</b>' + srcHint +
+  const roleKind = c.role === 'tech' || c.role === 'biz' ? c.role : '';
+  const prof = roleKind && S.pf && S.pf.projectId === S.cur.id ? S.pf.profiles[roleKind] : null;
+  const roleBar = roleKind
+    ? '<div class="df-rolebar ' + (roleKind === 'tech' ? 'is-tech' : 'is-biz') + '">' +
+        '<span>本章按【AI ' + (roleKind === 'tech' ? '技术专家' : '商务专家') + '】模式撰写，依据' +
+        (prof && prof.confirmed ? '已确认的项目' + (roleKind === 'tech' ? '技术' : '商务') + '画像' : '项目画像（还没确认，第一次生成时会让您确认）') + '</span>' +
+        '<a href="javascript:;" data-pfopen="' + roleKind + '">' + (prof && prof.confirmed ? '查看 / 修改画像' : '现在建画像') + '</a>' +
+        '<a href="javascript:;" data-pfdemo="' + roleKind + '">看看 AI 是怎么理解这个项目的</a>' +
+      '</div>'
+    : '';
+  return '<div class="df-panel">' + roleBar + '<div class="df-panel-h"><b>' + esc(c.title) + '</b>' + srcHint +
     '<span class="muted" style="font-size:12px">' + (c.body ? c.body.length + ' 字' : '还没有内容') + '</span></div>' +
     '<textarea class="df-editor" data-body="' + c.id + '" rows="16" placeholder="可以直接在这里写、改，或者点上面的「AI 写正文」让 AI 先写一版">' + esc(c.body || '') + '</textarea>' +
     '<div class="row" style="margin-top:10px"><button class="btn primary" data-savebody="' + c.id + '">保存正文</button>' +
@@ -1141,6 +1188,70 @@ function bindDraftEvents() {
   const btnRe = $('#btnReOutline');
   if (btnRe) btnRe.onclick = () => startOutline(st.doc, true);
 
+  /* 章节性质标签：点一下循环切换 重要技术 → 重要商务 → 不标注 */
+  document.querySelectorAll('[data-rolebtn]').forEach((el) => {
+    el.onclick = async (ev) => {
+      ev.stopPropagation();
+      const cid = el.dataset.rolebtn;
+      const ch = (d.docs[st.doc].chapters || []).find((x) => x.id === cid);
+      if (!ch) return;
+      // 注意：'' 是合法目标（不标注），不能用 || 兜底，否则 商务→技术 会跳过「不标注」
+      const curRole = ch.role === 'tech' || ch.role === 'biz' ? ch.role : '';
+      const next = Object.prototype.hasOwnProperty.call(ROLE_NEXT, curRole) ? ROLE_NEXT[curRole] : 'tech';
+      try {
+        const r = await api('PUT', '/api/projects/' + S.cur.id + '/draft/' + st.doc + '/chapter/' + cid + '/role', { role: next });
+        ch.role = r.role; ch.roleBy = 'user';
+        toast('已改为「' + ROLE_NAME[r.role || ''] + '」');
+        renderProject();
+      } catch (e) { toast(e.message, true); }
+    };
+  });
+
+  /* AI 复核章节性质 */
+  const btnRR = $('#btnReviewRoles');
+  if (btnRR) btnRR.onclick = async () => {
+    btnRR.disabled = true; const old = btnRR.textContent; btnRR.textContent = 'AI 正在复核…';
+    try {
+      const r = await api('POST', '/api/projects/' + S.cur.id + '/draft/' + st.doc + '/review-roles', {});
+      toast('复核完成：重要技术 ' + r.counts.tech + ' 章、重要商务 ' + r.counts.biz + ' 章');
+      await reloadDraft();
+    } catch (e) { toast(e.message, true); }
+    finally { btnRR.disabled = false; btnRR.textContent = old; }
+  };
+
+  /* 章节面板里「查看 / 修改画像」 */
+  document.querySelectorAll('[data-pfopen]').forEach((el) => {
+    el.onclick = (ev) => { ev.preventDefault(); openProfileDialog(el.dataset.pfopen, false); };
+  });
+  /* 「看看 AI 是怎么理解这个项目的」：只读展示已确认画像 */
+  document.querySelectorAll('[data-pfdemo]').forEach((el) => {
+    el.onclick = (ev) => {
+      ev.preventDefault();
+      const kind = el.dataset.pfdemo;
+      const p = S.pf && S.pf.profiles ? S.pf.profiles[kind] : null;
+      if (!p || !p.data) { openProfileDialog(kind, true); return; }
+      const d = p.data;
+      const li = (arr, f) => (Array.isArray(arr) ? arr.map(f).filter(Boolean).map((x) => '<li>' + x + '</li>').join('') : '');
+      openModal('<h3>AI ' + pfKindName(kind) + '专家对这个项目的理解</h3>' +
+        '<div class="pf-head">' + esc(d.summary || p.headline || '') + '</div>' +
+        '<div class="grid" style="margin-top:10px">' +
+        (d.direction ? '<div class="field full"><label>身份定位</label><div class="muted">' + esc(d.direction) + '</div></div>' : '') +
+        (d.stack && d.stack.length ? '<div class="field full"><label>技术环节</label><ol class="pf-list">' + li(d.stack, (x) => esc(x.stage) + (x.desc ? '：' + esc(x.desc) : '')) + '</ol></div>' : '') +
+        (d.targets && d.targets.length ? '<div class="field full"><label>硬指标</label><ul class="pf-list">' + li(d.targets, (x) => esc(x.item) + '：' + esc(x.value) + (x.page ? '（第' + esc(String(x.page)) + '页）' : '')) + '</ul></div>' : '') +
+        (d.difficulty && d.difficulty.length ? '<div class="field full"><label>技术难点</label><ul class="pf-list">' + li(d.difficulty, (x) => esc(x)) + '</ul></div>' : '') +
+        (d.focus && d.focus.length ? '<div class="field full"><label>评分关注点</label><ul class="pf-list">' + li(d.focus, (x) => esc(x)) + '</ul></div>' : '') +
+        (d.bizLogic ? '<div class="field full"><label>商务逻辑</label><div class="muted">' + esc(d.bizLogic) + '</div></div>' : '') +
+        (d.mgmtLogic ? '<div class="field full"><label>管理逻辑</label><div class="muted">' + esc(d.mgmtLogic) + '</div></div>' : '') +
+        (d.qualityLogic ? '<div class="field full"><label>质量逻辑</label><div class="muted">' + esc(d.qualityLogic) + '</div></div>' : '') +
+        (d.commitments && d.commitments.length ? '<div class="field full"><label>可以承诺的</label><ul class="pf-list">' + li(d.commitments, (x) => esc(x.item) + (x.note ? '：' + esc(x.note) : '')) + '</ul></div>' : '') +
+        (d.boundary && d.boundary.length ? '<div class="field full"><label>不能乱承诺的</label><ul class="pf-list">' + li(d.boundary, (x) => esc(x)) + '</ul></div>' : '') +
+        '</div>' +
+        '<div class="modal-foot"><button class="btn" data-close>关闭</button>' +
+        '<button class="btn primary" id="pfEdit">修改画像</button></div>');
+      $('#pfEdit').onclick = () => openProfileDialog(kind, false);
+    };
+  });
+
   /* 文件切换 */
   document.querySelectorAll('.df-doc').forEach((el) => {
     el.onclick = () => { S.df.doc = el.dataset.doc; S.df.openChapter = null; renderProject(); };
@@ -1155,8 +1266,8 @@ function bindDraftEvents() {
       const ch = (d.docs[st.doc].chapters || []).find((x) => x.id === cid);
       if (!ch) return;
       if (go === 'open' || go === 'table') { S.df.openChapter = S.df.openChapter === cid ? null : cid; renderProject(); return; }
-      if (go === 'write') { startChapter(cid, 'first', ch.body); return; }
-      if (go === 'expand') { startChapter(cid, 'expand', ch.body); return; }
+      if (go === 'write') { startChapter(cid, 'first', ch.body, ch.role); return; }
+      if (go === 'expand') { startChapter(cid, 'expand', ch.body, ch.role); return; }
       if (go === 'rename') {
         openModal('<h3>改章节名</h3><div class="field full"><label>章节标题</label><input id="rnTitle" value="' + esc(ch.title) + '"></div>' +
           '<div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okRn">保存</button></div>');
@@ -1286,7 +1397,7 @@ function bindDraftEvents() {
     try {
       const r = await dfPatch('/api/projects/' + S.cur.id + '/draft/' + st.doc + '/export');
       openModal('<h3>Word 已生成</h3><p>已保存到项目文件夹：</p>' +
-        '<div class="card" style="background:#f7f9fc"><code style="font-size:13px">D:\\投标工作台\\' + esc(r.relPath.replace(/\//g, '\\')) + '</code></div>' +
+        '<div class="card" style="background:#f7f9fc"><code style="font-size:13px">' + esc(rootPath() + '\\' + r.relPath.replace(/\//g, '\\')) + '</code></div>' +
         '<p class="muted" style="font-size:13px">打开 Word 后：按 F9 或右键目录选「更新域」可以刷新目录页码；正文页码从第二页开始编，封面不显示页码。</p>' +
         '<div class="modal-foot"><button class="btn" data-close>关闭</button>' +
         '<a class="btn primary" href="/api/download?path=' + encodeURIComponent(r.relPath) + '">下载这份 Word</a></div>');
@@ -1331,15 +1442,20 @@ async function startOutline(docKey, force) {
   } catch (e) { toast(e.message, true); }
 }
 
-async function startChapter(cid, mode, curBody) {
-  if (mode === 'first' && curBody && curBody.trim()) {
-    openModal('<h3>要重写这一章吗？</h3><p>这一章已经有内容了，重新让 AI 写会把它覆盖掉。' +
-      '如果只是想让内容更丰满，建议点「扩写」，AI 会在现有内容基础上补充。</p>' +
-      '<div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okReW">确定重写</button></div>');
-    $('#okReW').onclick = async () => { closeModal(); await doStartChapter(cid, 'first'); };
-    return;
-  }
-  await doStartChapter(cid, mode);
+async function startChapter(cid, mode, curBody, role) {
+  const go = async () => {
+    if (mode === 'first' && curBody && curBody.trim()) {
+      openModal('<h3>要重写这一章吗？</h3><p>这一章已经有内容了，重新让 AI 写会把它覆盖掉。' +
+        '如果只是想让内容更丰满，建议点「扩写」，AI 会在现有内容基础上补充。</p>' +
+        '<div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okReW">确定重写</button></div>');
+      $('#okReW').onclick = async () => { closeModal(); await doStartChapter(cid, 'first'); };
+      return;
+    }
+    await doStartChapter(cid, mode);
+  };
+  // v1.1.0：重要技术/商务章节，第一次写之前先让用户确认专家画像
+  if (role === 'tech' || role === 'biz') { await ensureProfileThen(role, go); return; }
+  await go();
 }
 
 async function doStartChapter(cid, mode) {
@@ -1350,6 +1466,133 @@ async function doStartChapter(cid, mode) {
     renderProject();
     dfPoll(r.taskId);
   } catch (e) { toast(e.message, true); }
+}
+
+
+/* ================= v1.1.0：专家画像 ================= */
+S.pf = null; // { projectId, profiles: { tech, biz } }
+
+async function loadProfilesFor(pid) {
+  try {
+    const r = await api('GET', '/api/projects/' + pid + '/profiles');
+    S.pf = { projectId: pid, profiles: r.profiles || {} };
+  } catch {
+    S.pf = { projectId: pid, profiles: {} };
+  }
+  return S.pf;
+}
+
+function pfKindName(kind) { return kind === 'tech' ? '技术' : '商务'; }
+
+// 把画像数据渲染成可编辑的表单
+function pfForm(kind, data) {
+  const d = data || {};
+  const lines = (arr, f) => (Array.isArray(arr) ? arr.map(f).filter(Boolean).join('\n') : '');
+  if (kind === 'tech') {
+    return '<div class="field full"><label>一句话理解（会显示给您确认）</label><textarea id="pfSummary" rows="2">' + esc(d.summary || '') + '</textarea></div>' +
+      '<div class="field full"><label>本项目所属技术方向</label><input id="pfDirection" value="' + esc(d.direction || '') + '"></div>' +
+      '<div class="field full"><label>这个方向的全流程技术环节（一行一个，格式：环节名称｜说明）</label><textarea id="pfStack" rows="6">' + esc(lines(d.stack, (x) => x && x.stage ? x.stage + (x.desc ? '｜' + x.desc : '') : '')) + '</textarea></div>' +
+      '<div class="field full"><label>本项目硬指标（一行一个，格式：指标｜数值｜页码）</label><textarea id="pfTargets" rows="6">' + esc(lines(d.targets, (x) => x && (x.item || x.value) ? [x.item, x.value, x.page].filter((v) => v !== '' && v != null).join('｜') : '')) + '</textarea></div>' +
+      '<div class="field full"><label>技术难点（一行一个）</label><textarea id="pfDifficulty" rows="3">' + esc(lines(d.difficulty, (x) => x)) + '</textarea></div>' +
+      '<div class="field full"><label>评委技术评分关注点（一行一个）</label><textarea id="pfFocus" rows="3">' + esc(lines(d.focus, (x) => x)) + '</textarea></div>' +
+      '<div class="field full"><label>技术逻辑主线</label><textarea id="pfApproach" rows="3">' + esc(d.approach || '') + '</textarea></div>';
+  }
+  return '<div class="field full"><label>一句话理解（会显示给您确认）</label><textarea id="pfSummary" rows="2">' + esc(d.summary || '') + '</textarea></div>' +
+    '<div class="field full"><label>我方以什么身份写商务标</label><input id="pfDirection" value="' + esc(d.direction || '') + '"></div>' +
+    '<div class="field full"><label>商务逻辑主线（交付→验收→付款→质保→售后→违约）</label><textarea id="pfBizLogic" rows="3">' + esc(d.bizLogic || '') + '</textarea></div>' +
+    '<div class="field full"><label>整体管理逻辑</label><textarea id="pfMgmtLogic" rows="3">' + esc(d.mgmtLogic || '') + '</textarea></div>' +
+    '<div class="field full"><label>质量管理逻辑</label><textarea id="pfQualityLogic" rows="2">' + esc(d.qualityLogic || '') + '</textarea></div>' +
+    '<div class="field full"><label>可以承诺的事项（一行一个，格式：事项｜怎么承诺）</label><textarea id="pfCommit" rows="4">' + esc(lines(d.commitments, (x) => x && x.item ? x.item + (x.note ? '｜' + x.note : '') : '')) + '</textarea></div>' +
+    '<div class="field full"><label>承诺边界（一行一个，不能乱承诺的地方）</label><textarea id="pfBoundary" rows="3">' + esc(lines(d.boundary, (x) => x)) + '</textarea></div>' +
+    '<div class="field full"><label>评委商务评分关注点（一行一个）</label><textarea id="pfFocus" rows="3">' + esc(lines(d.focus, (x) => x)) + '</textarea></div>';
+}
+
+function pfCollect(kind) {
+  const v = (id) => { const el = $('#' + id); return el ? el.value : ''; };
+  const split = (s) => String(s || '').split('\n').map((x) => x.trim()).filter(Boolean);
+  const pair = (s, a, b) => split(s).map((line) => {
+    const p = line.split(/[｜|]/);
+    const o = {}; o[a] = (p[0] || '').trim(); o[b] = (p[1] || '').trim(); return o;
+  }).filter((o) => o[a]);
+  if (kind === 'tech') {
+    return {
+      summary: v('pfSummary'), direction: v('pfDirection'),
+      stack: split(v('pfStack')).map((line) => { const p = line.split(/[｜|]/); return { stage: (p[0] || '').trim(), desc: (p[1] || '').trim() }; }).filter((x) => x.stage),
+      targets: split(v('pfTargets')).map((line) => { const p = line.split(/[｜|]/); return { item: (p[0] || '').trim(), value: (p[1] || '').trim(), page: (p[2] || '').trim() }; }).filter((x) => x.item || x.value),
+      difficulty: split(v('pfDifficulty')), focus: split(v('pfFocus')), approach: v('pfApproach')
+    };
+  }
+  return {
+    summary: v('pfSummary'), direction: v('pfDirection'),
+    bizLogic: v('pfBizLogic'), mgmtLogic: v('pfMgmtLogic'), qualityLogic: v('pfQualityLogic'),
+    commitments: pair(v('pfCommit'), 'item', 'note'),
+    boundary: split(v('pfBoundary')), focus: split(v('pfFocus'))
+  };
+}
+
+// 画像弹窗：needGen=true 表示还没有画像，先让 AI 生成
+function openProfileDialog(kind, needGen, onDone) {
+  const kn = pfKindName(kind);
+  const prof = S.pf && S.pf.profiles ? S.pf.profiles[kind] : null;
+  const confirmed = !!(prof && prof.confirmed);
+  const shell = (inner) => '<h3>AI ' + kn + '专家 · 上岗画像</h3>' + inner;
+  const okText = typeof onDone === 'function' ? '确认，开始写正文' : '确认修改';
+  const foot = (extra) => '<div class="modal-foot">' +
+    (extra || '') +
+    '<button class="btn" data-close>取消</button>' +
+    '<button class="btn" id="pfRegen">重新生成</button>' +
+    '<button class="btn primary" id="pfOk">' + okText + '</button></div>';
+
+  openModal(shell('<div class="placeholder"><span class="loading"></span> AI 正在通读招标文件、建立' + kn + '专家画像…（约 20～60 秒）</div>'));
+
+  const gen = async (isRegen) => {
+    try {
+      const r = await api('POST', '/api/projects/' + S.cur.id + '/profiles/' + kind + '/generate', {});
+      if (!S.pf) S.pf = { projectId: S.cur.id, profiles: {} };
+      S.pf.profiles[kind] = { kind, label: kn, confirmed: false, data: r.profile, headline: r.headline };
+      show(r.profile, r.headline, r.refsUsed, isRegen);
+    } catch (e) {
+      openModal(shell('<p style="color:#d1242f">' + esc(e.message) + '</p>' +
+        '<p class="muted" style="font-size:13px">画像要靠招标分析结果来建。如果还没做「招标分析」，请先去那一页做一次。</p>' +
+        '<div class="modal-foot"><button class="btn" data-close>关闭</button></div>'));
+    }
+  };
+
+  const show = (data, headline, refsUsed, isRegen) => {
+    const cur = S.pf && S.pf.profiles ? S.pf.profiles[kind] : null;
+    const tip = (cur && cur.confirmed)
+      ? '这个项目的' + kn + '画像之前已经确认过了。您可以继续用，也可以改。'
+      : '这是 AI 对这个项目的理解。请看一眼——如果哪里理解错了，直接在下面改，改完点「确认」。确认后这个项目以后每章都按这份画像写，不用再确认。';
+    openModal(shell(
+      '<div class="pf-head">' + esc(headline || '') + '</div>' +
+      '<p class="muted" style="margin:6px 0 12px;font-size:13px">' + tip +
+        (refsUsed ? '（本次参考了 ' + refsUsed + ' 个历史项目的经验）' : '（知识库还没有同类项目，本次按 AI 通用策略建立）') + '</p>' +
+      '<div class="grid">' + pfForm(kind, data) + '</div>') + foot());
+    const regen = $('#pfRegen');
+    if (regen) regen.onclick = () => gen(true);
+    $('#pfOk').onclick = async () => {
+      const payload = pfCollect(kind);
+      try {
+        await api('PUT', '/api/projects/' + S.cur.id + '/profiles/' + kind, { data: payload, confirm: true });
+        if (S.pf) { S.pf.profiles[kind] = { ...(S.pf.profiles[kind] || {}), kind, confirmed: true, data: payload }; }
+        closeModal();
+        toast('画像已确认，之后每章都按这份画像写');
+        if (typeof onDone === 'function') onDone();
+        else renderProject();
+      } catch (e) { toast(e.message, true); }
+    };
+  };
+
+  if (needGen || !prof || !prof.data || (!prof.data.summary && !prof.data.direction)) gen(false);
+  else show(prof.data, prof.headline || '', 0, false);
+}
+
+// 写正文前先确保画像已确认
+async function ensureProfileThen(kind, cb) {
+  if (!S.pf || S.pf.projectId !== S.cur.id) await loadProfilesFor(S.cur.id);
+  const prof = S.pf && S.pf.profiles ? S.pf.profiles[kind] : null;
+  if (prof && prof.confirmed) { cb(); return; }
+  openProfileDialog(kind, !prof || !prof.data || (!prof.data.summary && !prof.data.direction), cb);
 }
 
 /* ================= 模块4：文件核查 ================= */
@@ -1630,7 +1873,7 @@ function bindCheckEvents() {
     try {
       const r = await api('POST', '/api/projects/' + S.cur.id + '/check/export');
       openModal('<h3>核查报告已生成</h3><p>已保存到：</p>' +
-        '<div class="card" style="background:#f7f9fc"><code style="font-size:13px">D:\\投标工作台\\' + esc(r.relPath.replace(/\//g, '\\')) + '</code></div>' +
+        '<div class="card" style="background:#f7f9fc"><code style="font-size:13px">' + esc(rootPath() + '\\' + r.relPath.replace(/\//g, '\\')) + '</code></div>' +
         '<div class="modal-foot"><button class="btn" data-close>关闭</button>' +
         '<a class="btn primary" href="/api/download?path=' + encodeURIComponent(r.relPath) + '">下载这份 Word</a></div>');
     } catch (e) { toast(e.message, true); }
@@ -1834,7 +2077,7 @@ function bindSubmitEvents() {
     try {
       const r = await api('POST', '/api/projects/' + S.cur.id + '/submit/export');
       openModal('<h3>行动清单已生成</h3><p>已保存到：</p>' +
-        '<div class="card" style="background:#f7f9fc"><code style="font-size:13px">D:\\投标工作台\\' + esc(r.relPath.replace(/\//g, '\\')) + '</code></div>' +
+        '<div class="card" style="background:#f7f9fc"><code style="font-size:13px">' + esc(rootPath() + '\\' + r.relPath.replace(/\//g, '\\')) + '</code></div>' +
         '<p class="muted" style="font-size:13px">建议打印一份带在身上，每完成一项打一个勾。</p>' +
         '<div class="modal-foot"><button class="btn" data-close>关闭</button>' +
         '<a class="btn primary" href="/api/download?path=' + encodeURIComponent(r.relPath) + '">下载这份 Word</a></div>');
@@ -1851,7 +2094,7 @@ function closeProjectDialog() {
   const all = sb.data.items.length;
   openModal('<h3>关闭项目并归档</h3>' +
     '<p>关闭后，这个项目会从「我的项目」移到「已归档」，同时把招标文件、分析结果、投标文件、核查报告、递交清单整套复制到：</p>' +
-    '<div class="card" style="background:#f7f9fc"><code style="font-size:13px">D:\\投标工作台\\归档\\' + new Date().getFullYear() + '\\&lt;招标编号_项目名&gt;\\</code></div>' +
+    '<div class="card" style="background:#f7f9fc"><code style="font-size:13px">' + esc(rootPath() + '\\归档\\' + new Date().getFullYear() + '\\<招标编号_项目名>\\') + '</code></div>' +
     '<p class="muted" style="font-size:13px">归档后还能打开查看、也能重新打开继续编辑，不会删掉任何东西。</p>' +
     (done < all ? '<p class="warn-text">递交清单还有 ' + (all - done) + ' 项没勾，确认已经递交了吗？</p>' : '') +
     '<div class="grid"><div class="field full"><label>关闭说明（可留空，会写进归档文件夹）</label>' +
@@ -1907,6 +2150,117 @@ async function renderArchiveList() {
   });
 }
 
+
+/* ================= v1.1.0：专家知识库 ================= */
+async function renderKnowledgeList() {
+  S.kb = true;
+  let d;
+  try { d = await api('GET', '/api/knowledge'); } catch (e) {
+    $('#main').innerHTML = '<div class="page"><div class="placeholder">读取知识库失败：' + esc(e.message) + '</div></div>';
+    return;
+  }
+  const list = d.projects || [];
+  const head = '<div class="page-head"><div><div class="page-title">专家知识库</div>' +
+    '<div class="page-sub">每个项目关闭归档时，工作台会自动把这个项目的技术/商务重要章节、专家画像和生成记录沉淀到这里；以后做新项目时，AI 专家会参考同类项目的经验。</div></div></div>';
+  const empty = '<div class="placeholder">知识库还是空的。<br>等您把一个项目「关闭并归档」之后，这个项目的重要技术内容、重要商务内容、专家画像就会自动存进来。<br><br>' +
+    '<span class="muted" style="font-size:13px">没有历史数据也不影响使用——AI 会按通用策略先建画像，数据越多越贴合您公司。</span></div>';
+  const cards = list.map((k) => {
+    const c = k.counts || {};
+    const hasP = !!(k.hasProfile && (k.hasProfile.tech || k.hasProfile.biz));
+    const dirTxt = (k.direction && (k.direction.tech || k.direction.biz)) || '';
+    return '<div class="kb-i" data-kb="' + esc(k.projectId) + '">' +
+      '<div class="kb-h"><b>' + esc(k.name || '未命名项目') + '</b>' +
+        (hasP ? '<span class="tag tag-green">有画像</span>' : '<span class="tag tag-gray">无画像</span>') + '</div>' +
+      '<div class="kb-m">' + esc(k.code || '') + (dirTxt ? ' · ' + esc(dirTxt) : '') + '</div>' +
+      '<div class="kb-c"><span>重要技术 <b>' + (c.tech || 0) + '</b> 章</span><span>重要商务 <b>' + (c.biz || 0) + '</b> 章</span>' +
+        (k.purchaseMethod ? '<span>' + esc(k.purchaseMethod) + '</span>' : '') + '</div>' +
+      '<div class="kb-a"><span class="muted">归档于 ' + esc(String(k.archivedAt || '').slice(0, 10)) + '</span>' +
+        '<button class="btn tiny" data-kbview="' + esc(k.projectId) + '">查看</button>' +
+        '<button class="btn tiny danger" data-kbdel="' + esc(k.projectId) + '">删除</button></div></div>';
+  }).join('');
+  const stat = d.stat || {};
+  const statBar = list.length
+    ? '<div class="kb-stat">' +
+        '<span>已沉淀项目 <b>' + (stat.projects || list.length) + '</b> 个</span>' +
+        '<span>重要技术内容 <b>' + (stat.techChapters || 0) + '</b> 章</span>' +
+        '<span>重要商务内容 <b>' + (stat.bizChapters || 0) + '</b> 章</span>' +
+        '<span>技术画像 <b>' + (stat.techProfiles || 0) + '</b> 份</span>' +
+        '<span>商务画像 <b>' + (stat.bizProfiles || 0) + '</b> 份</span>' +
+        '<span class="muted">存放位置：' + esc(d.root || '') + '</span>' +
+      '</div>'
+    : '';
+  $('#main').innerHTML = '<div class="page">' + head + statBar +
+    (list.length ? '<div class="kb-list">' + cards + '</div>' : empty) + '</div>';
+  document.querySelectorAll('[data-kbview]').forEach((b) => {
+    b.onclick = (ev) => { ev.stopPropagation(); renderKnowledgeDetail(b.dataset.kbview); };
+  });
+  document.querySelectorAll('[data-kbdel]').forEach((b) => {
+    b.onclick = async (ev) => {
+      ev.stopPropagation();
+      const pid = b.dataset.kbdel;
+      openModal('<h3>从知识库里删掉这个项目？</h3><p>只会删掉知识库里的这份经验记录，<b>不会动归档文件夹里的任何文件</b>。</p>' +
+        '<div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn danger" id="okKbDel">删掉</button></div>');
+      $('#okKbDel').onclick = async () => {
+        try { await api('DELETE', '/api/knowledge/' + pid); closeModal(); toast('已删除'); renderKnowledgeList(); }
+        catch (e) { toast(e.message, true); }
+      };
+    };
+  });
+}
+
+async function renderKnowledgeDetail(pid) {
+  let d;
+  try { d = await api('GET', '/api/knowledge/' + pid); } catch (e) {
+    toast(e.message, true); return;
+  }
+  const k = d.knowledge || (d && d.record ? d : {});
+  const rec = k.record || {};
+  const chs = {
+    tech: (k.chapters && k.chapters.tech && k.chapters.tech.chapters) || [],
+    biz: (k.chapters && k.chapters.biz && k.chapters.biz.chapters) || []
+  };
+  const hist = (k.history && k.history.records) || [];
+  const prof = k.profiles || {};
+  const block = (role, title, cls) => {
+    const arr = chs[role] || [];
+    return '<div class="card kb-sec"><div class="kb-sec-h"><span class="tag ' + cls + '">' + title + '</span>' +
+      '<span class="muted">' + arr.length + ' 章</span></div>' +
+      (arr.length ? arr.map((c) => '<details class="kb-ch"><summary>' + esc((c.number ? c.number + ' ' : '') + c.title) +
+        ' <span class="muted">' + (String(c.body || '').length) + ' 字</span></summary>' +
+        '<pre class="kb-body">' + esc(String(c.body || '').slice(0, 4000)) + (String(c.body || '').length > 4000 ? '\n…（只显示前 4000 字）' : '') + '</pre></details>').join('')
+        : '<div class="muted" style="font-size:13px;padding:6px 0">没有记录</div>') + '</div>';
+  };
+  const profBlock = (role, title, cls) => {
+    const p = prof[role];
+    if (!p || !p.data) return '';
+    const pd = p.data;
+    return '<div class="card kb-sec"><div class="kb-sec-h"><span class="tag ' + cls + '">' + title + '画像</span>' +
+      (p.confirmed ? '<span class="muted">已确认</span>' : '<span class="muted">未确认</span>') + '</div>' +
+      (pd.summary ? '<div class="pf-head" style="margin:4px 0 8px">' + esc(pd.summary) + '</div>' : '') +
+      (pd.direction ? '<div class="muted" style="font-size:13px">方向：' + esc(pd.direction) + '</div>' : '') +
+      (Array.isArray(p.revisions) && p.revisions.length
+        ? '<div class="muted" style="font-size:13px">共修改 ' + p.revisions.length + ' 次：' +
+          p.revisions.slice(-5).map((r) => esc(String(r.at || '').slice(0, 10)) + (r.note ? '（' + esc(r.note) + '）' : '')).join('、') + '</div>'
+        : '') + '</div>';
+  };
+  $('#main').innerHTML = '<div class="page">' +
+    '<div class="page-head"><div><button class="btn tiny" id="kbBack">← 返回知识库</button>' +
+    '<div class="page-title" style="margin-top:8px">' + esc(rec.name || '未命名项目') + '</div>' +
+    '<div class="page-sub">' + esc(rec.code || '') + (rec.purchaseMethod ? ' · ' + esc(rec.purchaseMethod) : '') +
+      (rec.archivedAt ? ' · 归档于 ' + esc(String(rec.archivedAt).slice(0, 10)) : '') + '</div></div></div>' +
+    profBlock('tech', '技术专家', 'tag-blue') + profBlock('biz', '商务专家', 'role-biz') +
+    block('tech', '重要技术内容', 'tag-blue') + block('biz', '重要商务内容', 'role-biz') +
+    '<div class="card kb-sec"><div class="kb-sec-h"><span class="tag tag-gray">生成记录</span>' +
+      '<span class="muted">' + hist.length + ' 条</span></div>' +
+      (hist.length ? '<table class="tbl"><thead><tr><th>章节</th><th>性质</th><th>AI 生成次数</th><th>最终字数</th><th>是否保留</th></tr></thead><tbody>' +
+        hist.map((h) => '<tr><td>' + esc(h.title || '') + '</td><td>' + esc(h.role === 'tech' ? '技术' : h.role === 'biz' ? '商务' : '') + '</td>' +
+          '<td>' + (h.aiTimes || 0) + '</td><td>' + (h.chars || 0) + '</td><td>' + (h.kept ? '保留' : '被替换') + '</td></tr>').join('') +
+        '</tbody></table>' : '<div class="muted" style="font-size:13px">没有记录</div>') + '</div>' +
+    '</div>';
+  const back = $('#kbBack');
+  if (back) back.onclick = () => renderKnowledgeList();
+}
+
 /* ---------- 启动 ---------- */
 async function loadHealth() {
   try {
@@ -1919,6 +2273,8 @@ async function loadHealth() {
 
 async function boot() {
   $('#btnNew').onclick = newProjectDialog;
+  const btnKB = $('#btnKB');
+  if (btnKB) btnKB.onclick = () => { S.archived = false; $('#btnArchived').textContent = '查看已归档'; renderKnowledgeList(); };
   $('#btnSettings').onclick = settingsDialog;
   $('#btnArchived').onclick = async () => {
     S.archived = !S.archived;

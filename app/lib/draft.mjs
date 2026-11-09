@@ -3,7 +3,9 @@ import path from 'node:path';
 import { DATA_DIR } from './config.mjs';
 import { uid, nowIso } from './util.mjs';
 import { callJson, callText } from './ai.mjs';
-import { SYSTEM_DRAFT, draftUserPrompt } from './prompt.mjs';
+import { SYSTEM_DRAFT, SYSTEM_ROLE_REVIEW, draftUserPrompt, draftSystemPrompt, roleReviewUserPrompt } from './prompt.mjs';
+import { getProfile, profileToPrompt } from './profile.mjs';
+import { buildReferenceBlock } from './knowledge.mjs';
 
 export const DRAFT_DIR = path.join(DATA_DIR, '制作');
 const TASKS_DIR = path.join(DRAFT_DIR, '.tasks');
@@ -31,8 +33,78 @@ export const DOC_META = {
 };
 export const DOC_ORDER = ['price', 'biz', 'qual'];
 
+// v1.1.0：role 标识章节属于哪类"高质量内容" —— tech=重要技术、biz=重要商务、''=不标注（不自由编制或普通章节）
 function ch(title, type, hint, words) {
-  return { id: uid('c_'), title, type: type || 'normal', hint: hint || '', words: words || 450, body: '', source: '', level: 0, number: '', noIdx: false, updatedAt: '' };
+  const c = { id: uid('c_'), title, type: type || 'normal', hint: hint || '', words: words || 450, body: '', source: '', level: 0, number: '', noIdx: false, role: '', roleBy: '', updatedAt: '' };
+  c.role = guessRole(c);
+  if (c.role) c.roleBy = 'rule';
+  return c;
+}
+
+// 规则粗判（AI 复核会覆盖）：区分"技术自由编制"与"商务自由编制"
+// 注意：质量保证、进度计划、组织机构、培训、售后、保密、六性 按需求文档属于商务自由编制
+const TECH_RE = /技术方案|技术路线|技术措施|实施方案|设计方案|技术响应|服务方案|运维方案|检测方案|采集方案|验收方案|测试方案|试验|工艺|设备选型|系统架构|平台架构|数据|算法|网络|安全技术|接口|部署|集成|调试|指标/;
+const BIZ_RE = /组织机构|组织架构|人员配置|项目团队|项目管理|进度计划|进度安排|工期|质量保证|质量管理|质量承诺|六性|可靠性|维修性|保障性|测试性|安全性|环境适应性|售后服务|售后|培训|保密|廉洁|风险|应急预案|沟通|协调|台账|信息管理|档案|文档管理|服务承诺|履约|合同管理|分包|本地化|备品备件/;
+
+export function guessRole(c) {
+  if (!c) return '';
+  if (c.type !== 'normal') return ''; // 封面/目录/索引表/偏离表/价格表等不自由编制，不标注
+  const t = String(c.title || '');
+  const hint = String(c.hint || '');
+  const s = t + ' ' + hint;
+  const isTech = TECH_RE.test(s);
+  const isBiz = BIZ_RE.test(t); // 只看标题，避免 hint 里提到"技术"被误判
+  if (isTech && isBiz) {
+    // 标题里出现"质量/进度/组织/保密/售后/培训"这类，优先算商务
+    return BIZ_RE.test(t) ? 'biz' : 'tech';
+  }
+  if (isTech) return 'tech';
+  if (isBiz) return 'biz';
+  return '';
+}
+
+// AI 复核后批量写入（只改 roleBy='rule' 或空的，不动用户手工切换过的）
+export function applyRoleReview(doc, map) {
+  let n = 0;
+  (doc.chapters || []).forEach((c) => {
+    if (!c || c.type !== 'normal') return;
+    if (c.roleBy === 'user') return;
+    const k = String(c.id || '');
+    if (!(k in map)) return;
+    const v = map[k] === 'tech' || map[k] === 'biz' ? map[k] : '';
+    if (v !== c.role) { c.role = v; c.roleBy = 'ai'; n++; }
+  });
+  return n;
+}
+
+// AI 复核章节性质（一次调用判完整份文件），返回 {changed, map}
+export async function reviewRoles(doc) {
+  const list = (doc.chapters || []).filter((c) => c && c.type === 'normal');
+  if (!list.length) return { changed: 0, map: {} };
+  let raw;
+  try {
+    raw = await callJson(SYSTEM_ROLE_REVIEW, roleReviewUserPrompt(list), { maxTokens: 4000, timeoutMs: 180000, temperature: 0.1, reasoningEffort: 'none' });
+  } catch (e) {
+    return { changed: 0, map: {}, error: String(e && e.message || e) };
+  }
+  const items = (raw && raw.items) || (Array.isArray(raw) ? raw : []);
+  const map = {};
+  items.forEach((it) => {
+    if (!it || !it.id) return;
+    const v = String(it.role || '').toLowerCase();
+    map[it.id] = v === 'tech' || v === 'biz' ? v : '';
+  });
+  const changed = applyRoleReview(doc, map);
+  return { changed, map };
+}
+
+export function setChapterRole(doc, cid, role) {
+  const c = (doc.chapters || []).find((x) => x.id === cid);
+  if (!c) return null;
+  c.role = role === 'tech' || role === 'biz' ? role : '';
+  c.roleBy = 'user';
+  c.updatedAt = nowIso();
+  return c;
 }
 
 // 用上传的 Word 结构整份替换章节（保留封面/目录在前），并留一份自动框架备份供「恢复自动框架」
@@ -43,6 +115,7 @@ export function applyUploadedOutline(doc, outline, fileName) {
     doc.autoBackup = JSON.parse(JSON.stringify((doc.chapters || []).filter((c) => c.type !== 'cover' && c.type !== 'toc')));
     doc.autoBackupAt = nowIso();
   }
+  const prevChapters = doc.chapters || [];
   const list = [cover, toc];
   for (const c of outline) {
     const t = String(c.title || '').trim();
@@ -53,10 +126,13 @@ export function applyUploadedOutline(doc, outline, fileName) {
     // 保留 Word 里原本的自动编号（如「1」「5.1」）；分部标题（资格审查部分/商务部分/技术部分）本来就没编号
     item.number = String(c.number == null ? '' : c.number);
     item.noIdx = true; // 上传的标书按原编号显示，不再用数组下标重新编号
+    item.words = 0; // 上传的章节没有字数建议，生成时按「重要技术/商务」给足篇幅
     item.source = 'upload';
     item.updatedAt = nowIso();
     list.push(item);
   }
+  // 把原来标注好的「重要技术 / 重要商务」按标题搬到新结构上，别让用户白标一遍
+  migrateRolesByTitle(prevChapters, list);
   doc.chapters = list;
   doc.built = true;
   doc.source = 'upload';
@@ -70,7 +146,10 @@ export function restoreAutoOutline(doc) {
   if (!doc.autoBackup || !doc.autoBackup.length) return null;
   const cover = (doc.chapters || []).find((c) => c.type === 'cover') || ch('封面', 'cover');
   const toc = (doc.chapters || []).find((c) => c.type === 'toc') || ch('目录', 'toc');
-  doc.chapters = [cover, toc, ...JSON.parse(JSON.stringify(doc.autoBackup))];
+  const prevChapters = doc.chapters || [];
+  const restored = JSON.parse(JSON.stringify(doc.autoBackup));
+  migrateRolesByTitle(prevChapters, restored);
+  doc.chapters = [cover, toc, ...restored];
   doc.source = 'auto';
   doc.updatedAt = nowIso();
   return doc;
@@ -177,6 +256,19 @@ function lcsRatio(a, b) {
     }
   }
   return dp[b.length] / b.length;
+}
+
+// v1.1.0：把「重要技术/商务」标识按标题模糊匹配迁移到另一套章节结构上（归档时用上传定稿为准）
+export function migrateRolesByTitle(fromChapters, toChapters) {
+  const src = (fromChapters || []).filter((c) => c && (c.role === 'tech' || c.role === 'biz'));
+  if (!src.length) return 0;
+  let n = 0;
+  (toChapters || []).forEach((c) => {
+    if (!c || c.type !== 'normal' || c.role) return;
+    const m = bestMatch(src, c);
+    if (m && m.role) { c.role = m.role; c.roleBy = 'migrate'; n++; }
+  });
+  return n;
 }
 
 function bestMatch(pool, nc) {
@@ -295,14 +387,19 @@ function buildMergedDoc(docs) {
 export function setMode(pid, mode) {
   const d = ensureDraft(pid);
   const oldDocs = clone(d.docs || {});
+  // v1.1.0：切编制方式时把「重要技术 / 重要商务」标注一起搬过去，别让用户白标一遍
+  const allOld = [];
+  Object.keys(oldDocs).forEach((k) => (oldDocs[k].chapters || []).forEach((c) => { if (c) allOld.push(c); }));
   d.mode = mode === 'merged' ? 'merged' : 'split';
   if (d.mode === 'merged') {
     d.docs.merged = carryOver(oldDocs, buildMergedDoc(oldDocs));
+    migrateRolesByTitle(allOld, d.docs.merged.chapters);
   } else {
     DOC_ORDER.forEach((k) => {
       const base = (d.docs[k] && (d.docs[k].chapters || []).length) ? d.docs[k] : makeDoc(k);
       if (!base.built) base.built = (oldDocs[k] && oldDocs[k].built) || false;
       d.docs[k] = carryOver(oldDocs, base);
+      migrateRolesByTitle(allOld, d.docs[k].chapters);
     });
   }
   return saveDraft(pid, d);
@@ -499,12 +596,15 @@ function relevance(a, b) {
 }
 
 // 章节标题 → 该章必须逐条响应的板块（技术类章节强制对齐技术条款）
-function clauseKeysFor(docKey, title) {
+function clauseKeysFor(docKey, title, role) {
   const t = String(title || '');
-  const isTech = /技术|方案|实施|工艺|方法|设备|系统|流程|质量|进度|安全|应急|服务内容|服务方案|运维|检测|采集/.test(t);
-  const isBiz = /商务|资格|资质|业绩|财务|人员|团队|售后|承诺|保密|知识产权|廉洁|信用/.test(t);
   if (docKey === 'qual') return ['qualify', 'conform'];
   if (docKey === 'price') return ['frontTable', 'business'];
+  // v1.1.0：已标注重要性的章节按 role 决定注入哪些板块，未标注的沿用旧规则
+  if (role === 'tech') return ['tech', 'deliver', 'business'];
+  if (role === 'biz') return ['business', 'qualify', 'conform', 'score'];
+  const isTech = /技术|方案|实施|工艺|方法|设备|系统|流程|质量|进度|安全|应急|服务内容|服务方案|运维|检测|采集/.test(t);
+  const isBiz = /商务|资格|资质|业绩|财务|人员|团队|售后|承诺|保密|知识产权|廉洁|信用/.test(t);
   if (isTech && !isBiz) return ['tech', 'deliver', 'business'];
   if (isBiz) return ['business', 'qualify', 'conform', 'score'];
   return ['business', 'tech', 'deliver', 'conform', 'score'];
@@ -518,7 +618,8 @@ export async function generateChapter(project, draft, docKey, chapterId, analysi
   const c = (doc.chapters || []).find((x) => x.id === chapterId);
   if (!c) throw new Error('章节不存在');
   if (!['normal'].includes(c.type)) throw new Error('这一章是表格类，不需要 AI 写正文');
-  const keys = clauseKeysFor(docKey, c.title + ' ' + c.hint);
+  const role = c.role === 'tech' || c.role === 'biz' ? c.role : '';
+  const keys = clauseKeysFor(docKey, c.title + ' ' + c.hint, role);
   const pool = pickSection(analysis, keys)
     .map((it) => ({ text: rowText(it), page: it.page, star: !!it.isStar }))
     .filter((x) => x.text && x.text.length > 8);
@@ -542,14 +643,37 @@ export async function generateChapter(project, draft, docKey, chapterId, analysi
   if (scores.length) {
     scoreStandard = scores.map((it) => rowText(it)).filter((t) => relevance(kw, t) > 0.05).slice(0, 8).join('\n');
   }
+  // v1.1.0：重要技术/商务章节按专家深度给足篇幅（上传的标书章节没有字数建议，默认 450 太薄）
+  let words = Number(c.words) > 0 ? Number(c.words) : 500;
+  if (role === 'tech') words = Math.max(words, 1800);
+  else if (role === 'biz') words = Math.max(words, 1400);
   const ctx = {
     projectName: project.name, projectCode: project.code, owner: project.owner, method: project.purchaseMethod,
     budget: project.budget, deadline: project.bidDeadline, docName: doc.title, chapterTitle: c.title, hint: c.hint,
     scoreStandard, clauses, outline: (doc.chapters || []).map((x) => x.title),
-    words: c.words || 500, mode: mode === 'expand' ? 'expand' : 'first', current: mode === 'expand' ? c.body : ''
+    words, mode: mode === 'expand' ? 'expand' : 'first', current: mode === 'expand' ? c.body : '',
+    roleKind: role
   };
-  const text = await callText(SYSTEM_DRAFT, draftUserPrompt(ctx), { maxTokens: Math.min(4000 + (c.words || 500) * 4, 20000), timeoutMs: 300000, temperature: 0.5, reasoningEffort: 'none' });
-  const body = String(text || '').trim();
+  // v1.1.0：重要技术/商务章节注入已确认的专家画像 + 历史经验参考
+  if (role) {
+    const prof = getProfile(project.id, role);
+    if (prof && prof.confirmed && prof.data) ctx.profileText = profileToPrompt(role, prof.data);
+    try {
+      const ref = buildReferenceBlock(project, role, 3);
+      if (ref && ref.text) ctx.referenceText = ref.text;
+    } catch { /* 知识库为空或读失败，不影响生成 */ }
+  }
+  const sysPrompt = draftSystemPrompt(role);
+  const maxTokens = Math.min(6000 + words * 4, 32000);
+  let text = await callText(sysPrompt, draftUserPrompt(ctx), { maxTokens, timeoutMs: 300000, temperature: 0.5, reasoningEffort: 'none' });
+  let body = String(text || '').trim();
+  // 重要技术/商务章节写得过短时，再要一次（模型偶尔会提前收尾）
+  if (role && body.length > 40 && body.length < words * 0.55) {
+    const retryCtx = { ...ctx, mode: 'expand', current: body };
+    const t2 = await callText(sysPrompt, draftUserPrompt(retryCtx), { maxTokens, timeoutMs: 300000, temperature: 0.5, reasoningEffort: 'none' });
+    const b2 = String(t2 || '').trim();
+    if (b2.length > body.length) body = b2;
+  }
   if (!body || body.length < 40) throw new Error('AI 没有返回有效正文');
   c.body = body;
   c.source = 'ai';
@@ -598,6 +722,9 @@ export function startChapterTask(project, draft, docKey, chapterId, analysis, mo
       if (fd) {
         const i = (fd.chapters || []).findIndex((x) => x.id === chapterId);
         if (i >= 0) { fd.chapters[i] = { ...fd.chapters[i], body: c.body, source: 'ai', updatedAt: c.updatedAt, coverage: c.coverage }; fd.updatedAt = nowIso(); }
+        // v1.1.0：记录一次 AI 生成历史（归档时写入知识库）
+        if (!Array.isArray(fd.genLog)) fd.genLog = [];
+        fd.genLog.push({ at: nowIso(), chapterId, title: (fd.chapters[i] || {}).title || '', role: (fd.chapters[i] || {}).role || '', mode: t.mode, chars: (c.body || '').length });
         saveDraft(project.id, fresh);
       }
       t.state = 'done'; t.message = '已生成'; t.finishedAt = nowIso();

@@ -7,6 +7,8 @@ import { loadAnalysis } from './analyze.mjs';
 import { loadDraft } from './draft.mjs';
 import { loadCheck } from './check.mjs';
 import { loadSubmit } from './submit.mjs';
+import { loadProfiles } from './profile.mjs';
+import { saveProjectKnowledge, keywordsOf } from './knowledge.mjs';
 
 function copyDir(src, dst) {
   if (!fs.existsSync(src)) return 0;
@@ -71,6 +73,45 @@ export function buildArchiveSummary(project, db) {
   };
 }
 
+
+// v1.1.0：归档时把本项目的重要技术/商务内容沉淀进本地知识库
+export function buildKnowledgePayload(project, db) {
+  const draft = loadDraft(project.id);
+  const profiles = loadProfiles(project.id);
+  const payload = { profiles: {}, chapters: { tech: [], biz: [] }, history: [], keywords: [] };
+  ['tech', 'biz'].forEach((k) => { if (profiles[k]) payload.profiles[k] = profiles[k]; });
+  if (draft) {
+    // 以「当前正在用的那套章节」为准：上传过 Word 就是上传定稿，否则是自动框架
+    const mode = draft.mode === 'split' ? 'biz' : 'merged';
+    const doc = (draft.docs || {})[mode] || (draft.docs || {}).merged || (draft.docs || {}).biz;
+    if (doc) {
+      const chs = (doc.chapters || []).filter((c) => c && (c.role === 'tech' || c.role === 'biz'));
+      chs.forEach((c) => {
+        const body = String(c.body || '').trim();
+        if (!body) return;
+        payload.chapters[c.role].push({
+          title: c.title, role: c.role, number: c.number || '', level: c.level || 1,
+          body: body.length > 20000 ? body.slice(0, 20000) : body,
+          source: c.source || '', updatedAt: c.updatedAt || ''
+        });
+      });
+      // 生成历史：记下哪一章 AI 写过、写了几次、最终是否保留
+      const log = Array.isArray(doc.genLog) ? doc.genLog : [];
+      const byChapter = {};
+      log.forEach((x) => { const k = x.chapterId || x.title; byChapter[k] = byChapter[k] || { title: x.title, role: x.role, times: 0, chars: 0 }; byChapter[k].times++; byChapter[k].chars = x.chars || byChapter[k].chars; });
+      const cur = {};
+      (doc.chapters || []).forEach((c) => { cur[c.id] = c; });
+      payload.history = Object.keys(byChapter).map((k) => ({
+        chapterId: k, title: byChapter[k].title, role: byChapter[k].role,
+        aiTimes: byChapter[k].times, chars: byChapter[k].chars,
+        kept: !!(cur[k] && String(cur[k].body || '').trim())
+      }));
+    }
+  }
+  payload.keywords = keywordsOf(project, profiles);
+  return payload;
+}
+
 // 执行归档：复制五类产物到 归档/<年>/<编号_项目名>/
 export function archiveProject(project, db, opt = {}) {
   const year = String(project.createdAt || nowIso()).slice(0, 4);
@@ -110,7 +151,17 @@ export function archiveProject(project, db, opt = {}) {
   ].join('\r\n'), 'utf8');
   files++;
 
-  return { dir: dst, relDir: path.relative(ARCHIVE_DIR, dst), files, summary };
+  // v1.1.0：把本次投标的重要技术/商务内容沉淀进本地专家知识库（失败不影响归档）
+  let knowledge = null;
+  try {
+    const payload = buildKnowledgePayload(project, db);
+    knowledge = saveProjectKnowledge(project, payload);
+    files += 1;
+  } catch (e) {
+    knowledge = { error: String(e && e.message || e) };
+  }
+
+  return { dir: dst, relDir: path.relative(ARCHIVE_DIR, dst), files, summary, knowledge };
 }
 
 export function listArchives() {
