@@ -408,3 +408,16 @@ label.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 1
   border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; font-size: 13px; color: #4b5563; }
 .kb-stat b { color: #111827; font-size: 14px; }
 .kb-stat .muted { margin-left: auto; font-size: 12px; }
+
+/* v1.1.1：知识库一致性提示 + 补录选择 */
+.kb-broken { border-color: #e6b8b8; background: #fffafa; }
+.kb-warn { margin: 6px 0 2px; padding: 6px 9px; background: #fdeaea; border: 1px solid #f0c9c9; border-radius: 6px; color: #a33; font-size: 12.5px; line-height: 1.6; }
+.kb-stat-bad { color: #a33; font-weight: 600; }
+.pick-list { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; }
+.pick-row { display: flex; gap: 9px; align-items: flex-start; padding: 9px 11px; border-bottom: 1px solid var(--line); cursor: pointer; font-size: 13.5px; }
+.pick-row:last-child { border-bottom: 0; }
+.pick-row:hover { background: #f6f9fd; }
+.pick-row input { margin-top: 3px; }
+
+/* v1.1.1：页面右上角操作按钮组 */
+.page-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

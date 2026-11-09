@@ -114,7 +114,12 @@ export function saveProjectKnowledge(project, payload) {
     });
   }
 
+  // v1.1.1：什么都没写进去（没有标注重要章节、也没有画像）就不要在索引里留一条空记录，
+  // 否则列表里会出现「文件缺失」的假告警。
+  const wroteAnything = rec.hasProfile.tech || rec.hasProfile.biz || rec.counts.tech || rec.counts.biz ||
+    (payload.history && payload.history.length);
   idx.projects = (idx.projects || []).filter((x) => x.projectId !== pid);
+  if (!wroteAnything) { saveIndex(idx); return null; }
   idx.projects.push(rec);
   saveIndex(idx);
   return rec;
@@ -176,22 +181,39 @@ export function buildReferenceBlock(project, kind, limit) {
 /* ---------- 管理界面 ---------- */
 export function listKnowledge() {
   const idx = loadIndex();
-  const projects = (idx.projects || []).map((r) => ({
-    ...r,
-    profileFiles: {
-      tech: fs.existsSync(path.join(DIR_PROFILE.tech, r.projectId + '.json')),
-      biz: fs.existsSync(path.join(DIR_PROFILE.biz, r.projectId + '.json'))
-    }
-  }));
+  const projects = (idx.projects || []).map((r) => {
+    // v1.1.1：一致性检查 —— index.json 里有记录，但对应的 JSON 文件被删了，要能在界面上看出来
+    const files = {
+      techProfile: fs.existsSync(path.join(DIR_PROFILE.tech, r.projectId + '.json')),
+      bizProfile: fs.existsSync(path.join(DIR_PROFILE.biz, r.projectId + '.json')),
+      techChapters: fs.existsSync(path.join(DIR_CHAPTER.tech, r.projectId + '.json')),
+      bizChapters: fs.existsSync(path.join(DIR_CHAPTER.biz, r.projectId + '.json')),
+      history: fs.existsSync(path.join(DIR_HISTORY, r.projectId + '.json'))
+    };
+    const missing = [];
+    if (!files.techProfile) missing.push('技术画像');
+    if (!files.bizProfile) missing.push('商务画像');
+    if (!files.techChapters) missing.push('技术章节');
+    if (!files.bizChapters) missing.push('商务章节');
+    if (!files.history) missing.push('生成记录');
+    return {
+      ...r,
+      files,
+      missing,
+      healthy: missing.length === 0,
+      profileFiles: { tech: files.techProfile, biz: files.bizProfile }
+    };
+  });
   const total = projects.length;
   const techCh = projects.reduce((n, r) => n + ((r.counts && r.counts.tech) || 0), 0);
   const bizCh = projects.reduce((n, r) => n + ((r.counts && r.counts.biz) || 0), 0);
   const techProf = projects.filter((r) => r.hasProfile && r.hasProfile.tech).length;
   const bizProf = projects.filter((r) => r.hasProfile && r.hasProfile.biz).length;
+  const broken = projects.filter((r) => !r.healthy).length;
   return {
     root: KB_DIR,
     updatedAt: idx.updatedAt,
-    stat: { projects: total, techChapters: techCh, bizChapters: bizCh, techProfiles: techProf, bizProfiles: bizProf },
+    stat: { projects: total, techChapters: techCh, bizChapters: bizCh, techProfiles: techProf, bizProfiles: bizProf, broken },
     projects: projects.sort((a, b) => String(b.archivedAt).localeCompare(String(a.archivedAt)))
   };
 }

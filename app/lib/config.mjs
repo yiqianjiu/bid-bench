@@ -22,7 +22,7 @@ export const DEFAULT_CONFIG = {
   deepseekBaseUrl: 'https://api.deepseek.com',
   deepseekModel: 'deepseek-flash',
   company: '',
-  version: '1.1.0'
+  version: '1.1.1'
 };
 
 export function ensureDirs() {

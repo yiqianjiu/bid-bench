@@ -2107,9 +2107,20 @@ function closeProjectDialog() {
       const r = await api('POST', '/api/projects/' + S.cur.id + '/close', { note: $('#clNote').value.trim() });
       closeModal();
       await refreshProjects();
+      const ks = r.knowledgeSummary;
+      const kbLine = ks
+        ? '<div class="card" style="background:#f2f7f2;border-color:#cfe3cf;margin-top:8px"><b>已沉淀进专家知识库</b>：' +
+          '重要技术 <b>' + (ks.tech || 0) + '</b> 章、重要商务 <b>' + (ks.biz || 0) + '</b> 章' +
+          ((ks.hasProfile && (ks.hasProfile.tech || ks.hasProfile.biz)) ? '，专家画像 ' +
+            [ks.hasProfile.tech ? '技术' : '', ks.hasProfile.biz ? '商务' : ''].filter(Boolean).join(' + ') + ' 各 1 份' : '') +
+          '。<br><span class="muted" style="font-size:13px">以后做同类项目时，AI 会参考这些经验（左侧「🧠 专家知识库」可以查看）。</span></div>'
+        : (r.knowledge && r.knowledge.error
+            ? '<p class="warn-text">知识库这次没写成功：' + esc(r.knowledge.error) + '<br>不影响归档，可以到「专家知识库」页对这个项目点「补录」。</p>'
+            : '<p class="muted" style="font-size:13px">这个项目没有标注重要技术/重要商务章节，所以知识库里没有内容。可以在「投标文件」页给章节打上「重要技术 / 重要商务」标签后，再来知识库点「补录」。</p>');
       openModal('<h3>已归档</h3><p>项目已关闭，全部资料已归档到：</p>' +
         '<div class="card" style="background:#f7f9fc"><code style="font-size:13px">' + esc(r.dir) + '</code></div>' +
         '<p class="muted" style="font-size:13px">共 ' + r.files + ' 个文件。以后要在别的标书里复用，直接去这个文件夹找。</p>' +
+        kbLine +
         '<div class="modal-foot"><button class="btn primary" data-close>知道了</button></div>');
       S.tab = 'info';
       await openProject(S.cur.id, true);
@@ -2140,12 +2151,30 @@ async function renderArchiveList() {
         '<div class="arch-m">' + esc(a.code || '') + (a.owner ? ' · ' + esc(a.owner) : '') + (a.budget ? ' · 预算 ' + esc(a.budget) : '') + '</div>' +
         '<div class="arch-p">' + esc(a.path) + '</div>' +
         '<div class="arch-a"><span class="muted">归档于 ' + esc(String(a.archivedAt).slice(0, 10)) + '</span>' +
-        '<button class="btn tiny" data-reveal="' + esc(a.path) + '">打开文件夹</button></div></div>').join('') + '</div>';
+        '<button class="btn tiny" data-reveal="' + esc(a.path) + '">打开文件夹</button>' +
+        (a.projectId ? '<button class="btn tiny" data-reopen="' + esc(a.projectId) + '">重新打开</button>' : '') +
+        '</div></div>').join('') + '</div>';
   $('#main').innerHTML = '<div class="page">' + head + body + '</div>';
   document.querySelectorAll('[data-reveal]').forEach((b) => {
     b.onclick = async () => {
       try { await api('POST', '/api/reveal', { path: b.dataset.reveal }); }
       catch (e) { toast(e.message, true); }
+    };
+  });
+  document.querySelectorAll('[data-reopen]').forEach((b) => {
+    b.onclick = async () => {
+      const pid = b.dataset.reopen;
+      openModal('<h3>重新打开这个项目？</h3>' +
+        '<p>项目会回到「我的项目」里，可以继续编辑。<b>归档文件夹和知识库记录都会保留</b>，不会删掉。</p>' +
+        '<div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okReopen">重新打开</button></div>');
+      $('#okReopen').onclick = async () => {
+        try {
+          await api('POST', '/api/projects/' + pid + '/reopen', {});
+          closeModal(); toast('已重新打开');
+          await refreshProjects();
+          await openProject(pid, true);
+        } catch (e) { toast(e.message, true); }
+      };
     };
   });
 }
@@ -2161,20 +2190,26 @@ async function renderKnowledgeList() {
   }
   const list = d.projects || [];
   const head = '<div class="page-head"><div><div class="page-title">专家知识库</div>' +
-    '<div class="page-sub">每个项目关闭归档时，工作台会自动把这个项目的技术/商务重要章节、专家画像和生成记录沉淀到这里；以后做新项目时，AI 专家会参考同类项目的经验。</div></div></div>';
+    '<div class="page-sub">每个项目关闭归档时，工作台会自动把这个项目的技术/商务重要章节、专家画像和生成记录沉淀到这里；以后做新项目时，AI 专家会参考同类项目的经验。</div></div>' +
+    '<div class="page-actions"><button class="btn" id="kbBackfill">从已有项目补录</button></div></div>';
   const empty = '<div class="placeholder">知识库还是空的。<br>等您把一个项目「关闭并归档」之后，这个项目的重要技术内容、重要商务内容、专家画像就会自动存进来。<br><br>' +
     '<span class="muted" style="font-size:13px">没有历史数据也不影响使用——AI 会按通用策略先建画像，数据越多越贴合您公司。</span></div>';
   const cards = list.map((k) => {
     const c = k.counts || {};
     const hasP = !!(k.hasProfile && (k.hasProfile.tech || k.hasProfile.biz));
     const dirTxt = (k.direction && (k.direction.tech || k.direction.biz)) || '';
-    return '<div class="kb-i" data-kb="' + esc(k.projectId) + '">' +
+    const broken = Array.isArray(k.missing) && k.missing.length;
+    return '<div class="kb-i' + (broken ? ' kb-broken' : '') + '" data-kb="' + esc(k.projectId) + '">' +
       '<div class="kb-h"><b>' + esc(k.name || '未命名项目') + '</b>' +
-        (hasP ? '<span class="tag tag-green">有画像</span>' : '<span class="tag tag-gray">无画像</span>') + '</div>' +
+        (hasP ? '<span class="tag tag-green">有画像</span>' : '<span class="tag tag-gray">无画像</span>') +
+        (broken ? '<span class="tag tag-red">文件缺失</span>' : '') + '</div>' +
       '<div class="kb-m">' + esc(k.code || '') + (dirTxt ? ' · ' + esc(dirTxt) : '') + '</div>' +
+      (broken ? '<div class="kb-warn">知识库里有记录，但这几份文件不见了：' + esc(k.missing.join('、')) +
+        '。点「补录」可以按项目现有内容重建。</div>' : '') +
       '<div class="kb-c"><span>重要技术 <b>' + (c.tech || 0) + '</b> 章</span><span>重要商务 <b>' + (c.biz || 0) + '</b> 章</span>' +
         (k.purchaseMethod ? '<span>' + esc(k.purchaseMethod) + '</span>' : '') + '</div>' +
       '<div class="kb-a"><span class="muted">归档于 ' + esc(String(k.archivedAt || '').slice(0, 10)) + '</span>' +
+        '<button class="btn tiny" data-kbfix="' + esc(k.projectId) + '">补录</button>' +
         '<button class="btn tiny" data-kbview="' + esc(k.projectId) + '">查看</button>' +
         '<button class="btn tiny danger" data-kbdel="' + esc(k.projectId) + '">删除</button></div></div>';
   }).join('');
@@ -2186,11 +2221,17 @@ async function renderKnowledgeList() {
         '<span>重要商务内容 <b>' + (stat.bizChapters || 0) + '</b> 章</span>' +
         '<span>技术画像 <b>' + (stat.techProfiles || 0) + '</b> 份</span>' +
         '<span>商务画像 <b>' + (stat.bizProfiles || 0) + '</b> 份</span>' +
+        (stat.broken ? '<span class="kb-stat-bad">' + stat.broken + ' 个项目的文件缺失，点「补录」可重建</span>' : '') +
         '<span class="muted">存放位置：' + esc(d.root || '') + '</span>' +
       '</div>'
     : '';
   $('#main').innerHTML = '<div class="page">' + head + statBar +
     (list.length ? '<div class="kb-list">' + cards + '</div>' : empty) + '</div>';
+  const bf = $('#kbBackfill');
+  if (bf) bf.onclick = () => backfillPicker();
+  document.querySelectorAll('[data-kbfix]').forEach((b) => {
+    b.onclick = (ev) => { ev.stopPropagation(); rebuildKnowledgeDialog(b.dataset.kbfix, true); };
+  });
   document.querySelectorAll('[data-kbview]').forEach((b) => {
     b.onclick = (ev) => { ev.stopPropagation(); renderKnowledgeDetail(b.dataset.kbview); };
   });
@@ -2206,6 +2247,61 @@ async function renderKnowledgeList() {
       };
     };
   });
+}
+
+// v1.1.1：从已有项目里挑一个补录进知识库
+async function backfillPicker() {
+  let d;
+  try { d = await api('GET', '/api/projects?archived=1'); } catch (e) { toast(e.message, true); return; }
+  const list = (d.projects || []);
+  if (!list.length) { toast('还没有任何项目可以补录', true); return; }
+  const rows = list.map((p) =>
+    '<label class="pick-row"><input type="radio" name="bfpid" value="' + esc(p.id) + '">' +
+    '<span><b>' + esc(p.name) + '</b><span class="muted"> · ' + esc(p.code || '无编号') + ' · ' +
+    (p.status === 'archived' ? '已归档' : '在办') + '</span></span></label>').join('');
+  openModal('<h3>从已有项目补录知识库</h3>' +
+    '<p>选一个项目，按它现在的章节内容生成知识库记录。建议选已经投完、内容定稿的项目。</p>' +
+    '<div class="pick-list">' + rows + '</div>' +
+    '<div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okBackfill">下一步</button></div>');
+  $('#okBackfill').onclick = () => {
+    const sel = document.querySelector('input[name="bfpid"]:checked');
+    if (!sel) { toast('先选一个项目', true); return; }
+    closeModal();
+    rebuildKnowledgeDialog(sel.value, true);
+  };
+}
+
+// v1.1.1：补录 / 重建知识库记录
+function rebuildKnowledgeDialog(pid, warn) {
+  openModal('<h3>' + (warn ? '补录知识库记录' : '重建知识库记录') + '</h3>' +
+    '<p>会按这个项目<b>现在的内容</b>重新生成一份知识库记录：重要技术章节、重要商务章节、专家画像、生成记录。</p>' +
+    '<p class="muted" style="font-size:13px">只影响知识库，不动归档文件夹，也不动项目状态。原有的同名记录会被覆盖。</p>' +
+    (warn ? '<p class="muted" style="font-size:13px">如果项目已经归档、本地制作稿不在了，会自动改用归档文件夹里的 03制作/制作稿.json。</p>' : '') +
+    '<div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okKbFix">开始补录</button></div>');
+  $('#okKbFix').onclick = async () => {
+    const btn = $('#okKbFix');
+    btn.disabled = true; btn.textContent = '补录中…';
+    try {
+      const r = await api('POST', '/api/knowledge/' + pid + '/rebuild', {});
+      closeModal();
+      if (!r.hasDraft) {
+        toast('这个项目还没有生成过投标文件章节，补录不到内容', true);
+        renderKnowledgeList();
+        return;
+      }
+      toast('已补录：技术 ' + r.chapters.tech + ' 章 / 商务 ' + r.chapters.biz + ' 章');
+      openModal('<h3>补录完成</h3>' +
+        '<p>重要技术 <b>' + r.chapters.tech + '</b> 章、重要商务 <b>' + r.chapters.biz + '</b> 章，生成记录 <b>' + r.history + '</b> 条。</p>' +
+        (r.fromArchive ? '<p class="muted" style="font-size:13px">内容取自归档文件夹里的制作稿。</p>' : '') +
+        (r.chapters.tech + r.chapters.biz === 0
+          ? '<p class="warn-text">这个项目的章节都还没有标注「重要技术 / 重要商务」，所以知识库里没有章节内容。可以到「投标文件」页给章节打标签后再补录。</p>' : '') +
+        '<div class="modal-foot"><button class="btn primary" data-close>知道了</button></div>');
+      renderKnowledgeList();
+    } catch (e) {
+      btn.disabled = false; btn.textContent = '开始补录';
+      toast(e.message, true);
+    }
+  };
 }
 
 async function renderKnowledgeDetail(pid) {

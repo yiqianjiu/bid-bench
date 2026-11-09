@@ -38,6 +38,7 @@ export function buildArchiveSummary(project, db) {
 
   return {
     project: {
+      id: project.id,
       name: project.name, code: project.code, autoCode: project.autoCode,
       owner: project.owner, agency: project.agency, budget: project.budget,
       bidDeadline: project.bidDeadline, openTime: project.openTime,
@@ -75,8 +76,8 @@ export function buildArchiveSummary(project, db) {
 
 
 // v1.1.0：归档时把本项目的重要技术/商务内容沉淀进本地知识库
-export function buildKnowledgePayload(project, db) {
-  const draft = loadDraft(project.id);
+export function buildKnowledgePayload(project, db, opt = {}) {
+  const draft = opt.draft || loadDraft(project.id);
   const profiles = loadProfiles(project.id);
   const payload = { profiles: {}, chapters: { tech: [], biz: [] }, history: [], keywords: [] };
   ['tech', 'biz'].forEach((k) => { if (profiles[k]) payload.profiles[k] = profiles[k]; });
@@ -156,7 +157,7 @@ export function archiveProject(project, db, opt = {}) {
   try {
     const payload = buildKnowledgePayload(project, db);
     knowledge = saveProjectKnowledge(project, payload);
-    files += 1;
+    if (knowledge) files += 1;
   } catch (e) {
     knowledge = { error: String(e && e.message || e) };
   }
@@ -179,6 +180,7 @@ export function listArchives() {
         year: y,
         folder: f,
         path: fd,
+        projectId: summary && summary.project ? (summary.project.id || '') : '',
         name: summary && summary.project ? summary.project.name : f,
         code: summary && summary.project ? summary.project.code : '',
         owner: summary && summary.project ? summary.project.owner : '',
@@ -190,4 +192,29 @@ export function listArchives() {
     }
   }
   return out.sort((a, b) => String(b.archivedAt).localeCompare(String(a.archivedAt)));
+}
+
+// v1.1.1：知识库补录 —— 不重新归档，只把「这个项目现在的内容」重新沉淀进知识库。
+// 优先读 数据/制作 下的制作稿；没有就退回去读归档文件夹里的 03制作/制作稿.json。
+export function rebuildKnowledgeFor(project) {
+  let draft = loadDraft(project.id);
+  let fromArchive = false;
+  if (!draft) {
+    const relDir = String(project.archiveNote || '').split('||')[1];
+    if (relDir) {
+      try {
+        const f = path.join(ARCHIVE_DIR, relDir, '03制作', '制作稿.json');
+        if (fs.existsSync(f)) { draft = JSON.parse(fs.readFileSync(f, 'utf8')); fromArchive = true; }
+      } catch {}
+    }
+  }
+  const payload = buildKnowledgePayload(project, null, { draft });
+  const record = saveProjectKnowledge(project, payload);
+  return {
+    record,
+    fromArchive,
+    hasDraft: !!draft,
+    chapters: { tech: payload.chapters.tech.length, biz: payload.chapters.biz.length },
+    history: payload.history.length
+  };
 }

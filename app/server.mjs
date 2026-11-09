@@ -20,7 +20,7 @@ import { loadCheck, saveCheck, listSources, startCheckTask, getCheckTask, ensure
 import { exportCheckDocx } from './lib/exportCheck.mjs';
 import { GROUPS, ensureSubmit, rebuildSubmit, saveSubmit, loadSubmit, ensureSubmitDirs } from './lib/submit.mjs';
 import { exportSubmitDocx } from './lib/exportSubmit.mjs';
-import { archiveProject, listArchives } from './lib/archive.mjs';
+import { archiveProject, listArchives, rebuildKnowledgeFor } from './lib/archive.mjs';
 
 const cfg = loadConfig();
 ensureDirs();
@@ -854,6 +854,19 @@ route('DELETE', '/api/knowledge/:pid', async (req, res, ctx) => {
   json(res, 200, { ok: !!ok });
 });
 
+// v1.1.1：从项目当前内容（或归档里的制作稿）补录/重建知识库记录
+route('POST', '/api/knowledge/:pid/rebuild', async (req, res, ctx) => {
+  const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.pid);
+  if (!p) return json(res, 404, { error: '项目不存在' });
+  try {
+    const r = rebuildKnowledgeFor(p);
+    addEvent(db, p.id, 'archive', '重建知识库记录（技术 ' + r.chapters.tech + ' 章 / 商务 ' + r.chapters.biz + ' 章）');
+    json(res, 200, { ok: true, ...r });
+  } catch (e) {
+    json(res, 500, { error: '重建失败：' + String(e && e.message || e) });
+  }
+});
+
 // ---------- 模块4：投标文件核查 ----------
 route('GET', '/api/projects/:id/check', async (req, res, ctx) => {
   const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.id);
@@ -986,7 +999,13 @@ route('POST', '/api/projects/:id/close', async (req, res, ctx) => {
     run(db, 'UPDATE projects SET status = ?, closedAt = ?, archiveNote = ?, updatedAt = ? WHERE id = ?',
       'archived', nowIso(), (body.note || '') + '||' + r.relDir, nowIso(), p.id);
     addEvent(db, p.id, 'archive', '项目关闭并归档到 ' + r.relDir);
-    json(res, 200, { ok: true, dir: r.dir, relDir: r.relDir, files: r.files, knowledge: r.knowledge || null });
+    json(res, 200, {
+      ok: true, dir: r.dir, relDir: r.relDir, files: r.files,
+      knowledge: r.knowledge || null,
+      knowledgeSummary: r.knowledge && !r.knowledge.error
+        ? { tech: (r.knowledge.counts && r.knowledge.counts.tech) || 0, biz: (r.knowledge.counts && r.knowledge.counts.biz) || 0, hasProfile: r.knowledge.hasProfile || {} }
+        : null
+    });
   } catch (e) {
     json(res, 500, { error: '归档失败：' + String(e && e.message || e) });
   }
@@ -1001,7 +1020,15 @@ route('POST', '/api/projects/:id/reopen', async (req, res, ctx) => {
 });
 
 route('GET', '/api/archives', async (req, res) => {
-  json(res, 200, { ok: true, archives: listArchives(), root: ARCHIVE_DIR });
+  // v1.1.1：早期归档的 项目摘要.json 里没有 projectId，用编号/名称回查一次，好让「重新打开」按钮能用
+  const list = listArchives().map((a) => {
+    if (a.projectId) return a;
+    let p = null;
+    if (a.code) p = get(db, 'SELECT id FROM projects WHERE code = ?', a.code);
+    if (!p && a.name) p = get(db, 'SELECT id FROM projects WHERE name = ?', a.name);
+    return p ? { ...a, projectId: p.id } : a;
+  });
+  json(res, 200, { ok: true, archives: list, root: ARCHIVE_DIR });
 });
 
 // 在资源管理器里打开某个文件夹
