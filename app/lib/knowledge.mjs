@@ -121,6 +121,7 @@ export function saveProjectKnowledge(project, payload) {
     writeJson(path.join(DIR_HISTORY, pid + '.json'), {
       projectId: pid, projectName: project.name || '', archivedAt: rec.archivedAt, records: payload.history
     });
+    rec.counts.history = payload.history.length;
   }
 
   // v1.1.1：什么都没写进去（没有标注重要章节、也没有画像）就不要在索引里留一条空记录，
@@ -201,13 +202,16 @@ export function listKnowledge() {
       indep: fs.existsSync(path.join(KB_DIR, '独立编制', r.projectId + '.json'))
     };
     const missing = [];
-    if (!files.techProfile) missing.push('技术画像');
-    if (!files.bizProfile) missing.push('商务画像');
-    if (!files.techChapters) missing.push('技术章节');
-    if (!files.bizChapters) missing.push('商务章节');
-    if (!files.history) missing.push('生成记录');
-    // v1.1.2：独立编制是可选项，只有索引里记了才检查
-    if (r.counts && r.counts.indep && !files.indep) missing.push('独立编制');
+    // v1.1.2 修正：画像 / 章节 / 生成记录本来就是「有才写」，只有索引里记了才该检查文件是否存在，
+    // 否则只沉淀了部分内容的项目会被误判成「文件缺失」（v1.1.1 遗留缺陷）
+    const c = r.counts || {};
+    const hp = r.hasProfile || {};
+    if (hp.tech && !files.techProfile) missing.push('技术画像');
+    if (hp.biz && !files.bizProfile) missing.push('商务画像');
+    if (c.tech && !files.techChapters) missing.push('技术章节');
+    if (c.biz && !files.bizChapters) missing.push('商务章节');
+    if (c.history && !files.history) missing.push('生成记录');
+    if (c.indep && !files.indep) missing.push('独立编制');
     return {
       ...r,
       files,
