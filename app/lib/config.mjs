@@ -22,7 +22,9 @@ export const DEFAULT_CONFIG = {
   deepseekBaseUrl: 'https://api.deepseek.com',
   deepseekModel: 'deepseek-flash',
   company: '',
-  version: '1.1.2'
+  // v1.1.5：关掉网页就自动关掉后台服务（默认开）。关掉后需要手动点「关闭工作台」
+  autoExitOnClose: true,
+  version: '1.2.0'
 };
 
 export function ensureDirs() {

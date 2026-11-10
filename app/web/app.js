@@ -6,7 +6,9 @@ const S = {
   cur: null,      // 当前项目详情
   tab: 'info',
   busy: '',
-  archived: false
+  archived: false,
+  projKw: '',      // v1.1.3：侧栏项目查找关键词
+  archKw: ''       // v1.1.3：归档页查找关键词
 };
 
 const TABS = [
@@ -100,11 +102,38 @@ function fmtLeft(deadline) {
 }
 
 /* ---------- 侧边栏 ---------- */
+/* v1.1.3：项目查找 —— 匹配名称、招标编号、招标人、内部编号、代理机构 */
+function projMatch(p, kw) {
+  if (!kw) return true;
+  const s = [p.name, p.code, p.owner, p.autoCode, p.agency].map((x) => String(x || '')).join(' ').toLowerCase();
+  return s.includes(kw);
+}
+
+/* v1.1.3：按投标截止日期由近到远排（没填截止的排最后） */
+function deadlineTs(v) {
+  const s = String(v || '').replace('T', ' ').replace(/\//g, '-').trim();
+  if (!s) return 0;
+  const d = new Date(s.replace(' ', 'T'));
+  return isNaN(d.getTime()) ? 0 : d.getTime();
+}
+function sortByDeadline(list) {
+  return list.slice().sort((x, y) => {
+    const a = deadlineTs(x.bidDeadline), b = deadlineTs(y.bidDeadline);
+    if (!a && !b) return String(x.name || '').localeCompare(String(y.name || ''));
+    if (!a) return 1;
+    if (!b) return -1;
+    return a - b;
+  });
+}
+
 function renderSidebar() {
   const list = $('#projectList');
-  const rows = S.projects.filter((p) => (S.archived ? p.status === 'archived' : p.status !== 'archived'));
+  const kw = String((S.projKw || '')).trim().toLowerCase();
+  const all = S.projects.filter((p) => (S.archived ? p.status === 'archived' : p.status !== 'archived'));
+  const rows = sortByDeadline(all).filter((p) => projMatch(p, kw));
   if (!rows.length) {
-    list.innerHTML = '<div class="muted" style="padding:10px;font-size:13px">' + (S.archived ? '还没有归档的项目' : '还没有项目，点上面「新建项目」开始') + '</div>';
+    list.innerHTML = '<div class="muted" style="padding:10px;font-size:13px">' +
+      (kw ? '没有匹配「' + esc(S.projKw) + '」的项目' : (S.archived ? '还没有归档的项目' : '还没有项目，点上面「新建项目」开始')) + '</div>';
     return;
   }
   list.innerHTML = rows.map((p) => {
@@ -132,6 +161,60 @@ async function refreshProjects() {
 function syncHash() {
   const h = S.cur ? '#/p/' + encodeURIComponent(S.cur.id) + '/' + S.tab : '#/';
   if (location.hash !== h) history.replaceState(null, '', h);
+}
+
+/* v1.1.4：默认启动页（首页） */
+function renderHome() {
+  const projs = (S.projects || []).filter((x) => x.status !== 'archived');
+  const recent = projs.slice(0, 4);
+  const cards = recent.map((x) => {
+    const left = fmtLeft(x.bidDeadline);
+    const dotCls = left.cls === 'c-red' ? '#d1242f' : left.cls === 'c-amber' ? '#bf8700' : left.cls === 'c-done' ? '#8a9099' : '#1a7f37';
+    return '<div class="home-proj" data-pid="' + x.id + '">' +
+      '<div class="hp-name">' + esc(x.name) + '</div>' +
+      '<div class="hp-meta">' + esc(x.code || x.autoCode || '') +
+        '<span><span class="dot" style="background:' + dotCls + '"></span>' +
+        (left.cls === 'c-done' ? '已截止' : left.big === '未设置' ? '无截止' : left.big.replace('剩 ', '剩 ')) + '</span></div>' +
+      '</div>';
+  }).join('');
+
+  $('#main').innerHTML = '<div class="page home">' +
+    '<div class="home-hero">' +
+      '<div class="home-title">投标业务工作台</div>' +
+      '<div class="home-sub">从招标文件到递交归档，一条线走完。</div>' +
+      '<div class="home-acts">' +
+        '<button class="home-act primary" id="homeNew"><div class="ha-ico">＋</div>' +
+          '<div class="ha-t">新建项目</div><div class="ha-d">从招标文件开始，走完整流程：分析 → 编制 → 核查 → 递交 → 归档</div></button>' +
+        '<button class="home-act" id="homeBackfill"><div class="ha-ico">⇪</div>' +
+          '<div class="ha-t">项目补录</div><div class="ha-d">投完的老项目，传招标文件和投标文件，自动分析并归档进知识库</div></button>' +
+      '</div>' +
+    '</div>' +
+    (recent.length ? '<div class="home-recent"><div class="home-recent-h">最近的 ' + recent.length + ' 个项目</div>' +
+      '<div class="home-projs">' + cards + '</div></div>' : '') +
+    '<div class="home-tip muted">所有资料都存在本地 ' + esc(rootPath()) + ' 目录里，不联网也能打开（只有 AI 分析需要联网）。</div>' +
+    '</div>';
+
+  const b1 = $('#homeNew');
+  if (b1) b1.onclick = newProjectDialog;
+  const b2 = $('#homeBackfill');
+  if (b2) b2.onclick = backfillDialog;
+  document.querySelectorAll('.home-proj').forEach((el) => {
+    el.onclick = () => openProject(el.dataset.pid);
+  });
+}
+
+/* v1.1.4：回到默认启动页（关闭归档 / 点「关闭页面」都走这里，不删任何数据） */
+function goHome() {
+  // v1.1.5：只清「当前页面」的状态，不动正在跑的任务（进度在左侧任务条里继续显示）
+  S.cur = null;
+  S.tab = 'info';
+  S.df = null;
+  S.an = null;
+  S.ck = null;
+  S.sb = null;
+  history.replaceState(null, '', '#/');
+  renderHome();
+  renderSidebar();
 }
 
 async function openProject(id, keepTab) {
@@ -169,8 +252,11 @@ function renderProject() {
           (p.status === 'archived' ? ' · <span class="tag">已归档</span>' : '') +
         '</div>' +
       '</div>' +
-      '<div class="clock ' + left.cls + '"><div class="dl">' + (left.urgent ? '⚠ 临近截止' : '距投标截止') + '</div>' +
-        '<div class="big">' + esc(left.big) + '</div><div class="dl">' + esc(left.sub) + '</div></div>' +
+      '<div class="page-head-r">' +
+        '<div class="clock ' + left.cls + '"><div class="dl">' + (left.urgent ? '⚠ 临近截止' : '距投标截止') + '</div>' +
+          '<div class="big">' + esc(left.big) + '</div><div class="dl">' + esc(left.sub) + '</div></div>' +
+        '<button class="btn tiny page-close" id="btnClosePage" title="关掉这个项目页面，回到首页（不会删任何数据）">✕ 关闭页面</button>' +
+      '</div>' +
     '</div>';
 
   const body = S.tab === 'info' ? viewInfo()
@@ -190,6 +276,8 @@ function renderProject() {
   $('#main').innerHTML = '<div class="page">' + head + roBanner + '<div class="tabs">' + tabs + '</div><div id="tabBody">' + body + '</div></div>';
   const roBtn = $('#main').querySelector('[data-ro-reopen]');
   if (roBtn) roBtn.onclick = () => reopenProject(roBtn.dataset.roReopen);
+  const closePg = $('#btnClosePage');
+  if (closePg) closePg.onclick = goHome;
 
 
   $('#main').querySelectorAll('.tab').forEach((el) => {
@@ -313,12 +401,14 @@ function viewTender() {
     '找出来的内容会先给你看一遍，你确认了才写进项目。</p>' +
     '<button class="btn primary" id="btnExtract"' + (files.length ? '' : ' disabled') + '>开始自动识别</button>' +
     '<span id="extractMsg" class="muted" style="margin-left:12px;font-size:13px"></span>' +
+    '<div id="extractErr" style="margin-top:12px"></div>' +
     '</div>';
 }
 
 
 /* ================= 页签：招标分析 ================= */
 S.an = null; // {projectId, data, loading, section, redOnly, running, task}
+S.anFail = null; // 上一次分析失败的任务（用于在页面上给出「安装识别工具」的引导）
 
 function anLoading() {
   return '<div class="placeholder"><span class="loading"></span> 正在读取分析结果…</div>';
@@ -361,6 +451,7 @@ function startAnalysisPolling(taskId) {
       S.an.timer = null;
       if (t.state === 'failed') toast('分析失败：' + (t.error || ''), true);
       const pid = S.an.projectId;
+      S.anFail = t.state === 'failed' ? Object.assign({ projectId: pid }, t) : null;
       S.an = null;
       await loadAnalysisFor(pid);
     }
@@ -396,6 +487,21 @@ function viewAnalysis() {
     if (an.running) {
       return '<div class="card"><h3>正在分析…</h3><div id="anProgress">' + progressHtml(an.task || an.running) + '</div>' +
         '<p class="muted" style="font-size:13px;margin-top:14px">第一次分析一份几十页的文件大约 3～5 分钟，请让这个页面开着，不要关。</p></div>';
+    }
+    const af = S.anFail && S.anFail.projectId === cur.id ? S.anFail : null;
+    if (af) {
+      const noTool = af.errorCode === 'NO_OCR_TOOL';
+      const ocrEmpty = af.errorCode === 'OCR_EMPTY';
+      return '<div class="card"><h3>这份招标文件没能自动读出来</h3>' +
+        '<p class="muted" style="margin-top:0;font-size:13px;max-width:660px">' + esc(af.error || '') + '</p>' +
+        (noTool ? '<div class="ocr-guide" id="ocrGuide"><div class="og-t">这台电脑还没有装文字识别工具</div>' +
+          '<div class="og-p">扫描件是图片，没有文字识别工具就读不出里面的字。装一个就能自动识别，以后所有扫描件都能读。大约几十 MB，只装一次。</div>' +
+          '<div class="row"><button class="btn primary" id="btnInstallOcr">安装识别工具</button>' +
+          '<span class="muted" id="ocrInstallMsg" style="font-size:13px"></span></div></div>' : '') +
+        (ocrEmpty ? '<div class="ocr-guide"><div class="og-t">这台电脑的识别工具也没读出来</div>' +
+          '<div class="og-p">可能是扫描件太模糊、倾斜，或者整页是手写/表格。可以换一份更清楚的扫描件重传，或者到「招标文件」页签点「看内容」挑页手动识别。</div></div>' : '') +
+        '<div class="row" style="margin-top:14px"><button class="btn" id="btnRetryAnalysis">再试一次</button>' +
+        '<button class="btn" id="btnGoTender2">去招标文件页看看</button></div></div>';
     }
     if (!tenderFiles.length) {
       return '<div class="card"><h3>还没有招标文件</h3>' +
@@ -551,6 +657,24 @@ function sectionHtml(sec, d) {
     '</div>' + body + '</div>';
 }
 
+/* ---- v1.1.4：装完识别工具自动重读 ---- */
+async function installOcrFromPage(btn, msgEl) {
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="loading"></span> 正在安装…'; }
+  const say = (t) => { if (msgEl) msgEl.textContent = t; };
+  say('正在下载安装包，大约几十 MB，请保持联网…');
+  try {
+    const r = await api('POST', '/api/ocr/install', {});
+    if (!r.ok) throw new Error(r.error || '安装失败');
+    say('装好了，正在重新识别…');
+    if (btn) { btn.textContent = '装好了'; btn.disabled = true; }
+    S.anFail = null;
+    setTimeout(() => startAnalysis(true), 800);
+  } catch (e) {
+    say('安装失败：' + e.message + '（也可以手动装一个 Tesseract-OCR，装完回来再试一次）');
+    if (btn) { btn.disabled = false; btn.textContent = '重新安装'; }
+  }
+}
+
 /* ---- 分析页事件 ---- */
 function bindAnalysisEvents() {
   const btnStart = $('#btnStartAnalysis');
@@ -565,6 +689,12 @@ function bindAnalysisEvents() {
   if (btnGoTender) btnGoTender.onclick = () => { S.tab = 'tender'; renderProject(); syncHash(); };
   const btnGoSet = $('#btnGoSettings');
   if (btnGoSet) btnGoSet.onclick = settingsDialog;
+  const btnGoTender2 = $('#btnGoTender2');
+  if (btnGoTender2) btnGoTender2.onclick = () => { S.tab = 'tender'; renderProject(); syncHash(); };
+  const btnRetry = $('#btnRetryAnalysis');
+  if (btnRetry) btnRetry.onclick = () => { S.anFail = null; startAnalysis(true); };
+  const btnInsOcr = $('#btnInstallOcr');
+  if (btnInsOcr) btnInsOcr.onclick = () => installOcrFromPage(btnInsOcr, $('#ocrInstallMsg'));
 
   $('#main').querySelectorAll('[data-sec]').forEach((el) => {
     el.onclick = () => { S.an.section = el.dataset.sec; S.an.redOnly = false; renderProject(); };
@@ -900,11 +1030,23 @@ async function startExtract() {
     showMetaResult(r);
   } catch (e) {
     toast(e.message, true);
-    msg.textContent = e.message;
+    msg.innerHTML = '';
+    const box = $('#extractErr');
+    if (box) box.innerHTML = /识别文字失败|扫描件|OCR/.test(e.message) ? ocrErrorCard(e.message) : '<span style="color:#b6242e">' + esc(e.message) + '</span>';
+    const bi = $('#btnInstallOcr2');
+    if (bi) bi.onclick = () => installOcrFromPage(bi, $('#ocrInstallMsg2'));
   } finally {
     btn.disabled = false;
     btn.textContent = '开始自动识别';
   }
+}
+
+function ocrErrorCard(errText) {
+  return '<div class="ocr-guide" id="ocrGuide"><div class="og-t">这份文件读不出文字</div>' +
+    '<div class="og-p">' + esc(errText || '') + '</div>' +
+    '<div class="og-p">如果是扫描件（整页是图片），装一个文字识别工具就能自动读。大约几十 MB，只装一次。</div>' +
+    '<div class="row"><button class="btn primary" id="btnInstallOcr2">安装识别工具</button>' +
+    '<span class="muted" id="ocrInstallMsg2" style="font-size:13px"></span></div></div>';
 }
 
 function showMetaResult(r) {
@@ -953,13 +1095,133 @@ function showMetaResult(r) {
 }
 
 /* ---------- 弹窗 ---------- */
-function openModal(html) {
+// v1.1.5：弹窗可以「锁死」——正在跑任务时，点遮罩、按 Esc、点取消都关不掉，
+// 只能走显式的二次确认，避免用户一失手就把正在跑的任务界面弄丢。
+let MODAL_LOCK = false;
+
+function openModal(html, opt) {
+  const o = opt || {};
   $('#modal').innerHTML = html;
   $('#modalMask').classList.add('on');
-  $('#modal').querySelectorAll('[data-close]').forEach((b) => { b.onclick = closeModal; });
+  MODAL_LOCK = !!o.lock;
+  $('#modalMask').classList.toggle('locked', MODAL_LOCK);
+  $('#modal').querySelectorAll('[data-close]').forEach((b) => {
+    b.onclick = () => { if (MODAL_LOCK) { toast('任务正在跑，先等它跑完（或者点「停止任务」）', true); return; } closeModal(); };
+  });
+  return $('#modal');
 }
-function closeModal() { $('#modalMask').classList.remove('on'); $('#modal').innerHTML = ''; }
+function closeModal(force) {
+  if (MODAL_LOCK && !force) { toast('任务正在跑，先等它跑完（或者点「停止任务」）', true); return; }
+  MODAL_LOCK = false;
+  $('#modalMask').classList.remove('on');
+  $('#modalMask').classList.remove('locked');
+  $('#modal').innerHTML = '';
+}
+function setModalLock(on) {
+  MODAL_LOCK = !!on;
+  $('#modalMask').classList.toggle('locked', MODAL_LOCK);
+}
 $('#modalMask') && ($('#modalMask').onclick = (e) => { if (e.target.id === 'modalMask') closeModal(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (!$('#modalMask').classList.contains('on')) return;
+  closeModal();
+});
+
+/* ---------- v1.1.5：全局任务中心（切页面、回首页都不丢进度） ---------- */
+const TASK_KIND_URL = {
+  analysis: (id) => '/api/tasks/' + id,
+  check: (id) => '/api/check-tasks/' + id,
+  draft: (id) => '/api/draft-tasks/' + id,
+  backfill: (id) => '/api/backfill/' + id,
+  cards: (id) => '/api/card-tasks/' + id
+};
+const TASK_KIND_PAGE = { analysis: 'analysis', check: 'check', draft: 'draft', backfill: '', cards: '' };
+
+let TASKS = { list: [], timer: null };
+
+async function pollActiveTasks() {
+  let d;
+  try { d = await api('GET', '/api/tasks/active'); } catch { return; }
+  const list = (d && d.tasks) || [];
+  const before = TASKS.list.map((t) => t.kind + ':' + t.id).join(',');
+  const after = list.map((t) => t.kind + ':' + t.id).join(',');
+  TASKS.list = list;
+  renderTaskBar();
+  // 任务跑完了：如果当前就在这个项目的对应页面，刷新一下把结果显示出来
+  if (before !== after) {
+    list.forEach((t) => { /* 仍在跑的不用管 */ });
+    if (S.cur && S.tab) {
+      const mine = list.find((t) => t.projectId === S.cur.id && TASK_KIND_PAGE[t.kind] === S.tab);
+      if (!mine) resyncCurrentPage();
+    }
+  }
+}
+
+// 任务状态变了就重新拉一次当前页数据（分析/核查/编制各有自己的加载函数）
+function resyncCurrentPage() {
+  if (!S.cur) return;
+  if (S.tab === 'analysis') { S.an = null; loadAnalysisFor(S.cur.id); }
+  else if (S.tab === 'draft') { S.df = null; loadDraftFor(S.cur.id); }
+  else if (S.tab === 'check') { S.ck = null; loadCheckFor(S.cur.id); }
+}
+
+function renderTaskBar() {
+  const box = $('#taskBar');
+  if (!box) return;
+  const list = TASKS.list || [];
+  if (!list.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  box.style.display = 'block';
+  box.innerHTML = '<div class="task-bar-h"><span class="spin"></span>' + list.length + ' 个任务正在跑（点一下去看）</div>' + list.map((t) => {
+    const pct = t.total ? Math.min(99, Math.round(((t.step || 0) / t.total) * 100)) : 30;
+    return '<div class="task-item" data-taskkind="' + esc(t.kind) + '" data-taskproj="' + esc(t.projectId || '') + '">' +
+      '<div class="task-top"><span class="task-kind">' + esc(t.kindLabel || '任务') + '</span>' +
+      '<span class="task-proj">' + esc(t.projectName || '') + '</span></div>' +
+      '<div class="task-bar-in"><i style="width:' + pct + '%"></i></div>' +
+      '<div class="task-msg">' + esc(t.message || '正在处理…') + '</div>' +
+      '</div>';
+  }).join('');
+  box.querySelectorAll('.task-item').forEach((el) => {
+    el.onclick = () => {
+      const pid = el.dataset.taskproj;
+      if (pid) openProject(pid);
+    };
+  });
+}
+
+function startTaskPolling() {
+  if (TASKS.timer) return;
+  pollActiveTasks();
+  TASKS.timer = setInterval(pollActiveTasks, 4000);
+}
+
+/* ---------- v1.1.5：心跳 + 关掉网页自动关服务 ---------- */
+function clientId() {
+  try {
+    let id = localStorage.getItem('twb_client_id');
+    if (!id) { id = 'c_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36); localStorage.setItem('twb_client_id', id); }
+    return id;
+  } catch { return 'c_' + Math.random().toString(36).slice(2, 10); }
+}
+
+function startHeartbeat() {
+  const cid = clientId();
+  const beat = () => {
+    try { fetch('/api/heartbeat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: cid }), keepalive: true }); } catch {}
+  };
+  beat();
+  setInterval(beat, 15000);
+  window.addEventListener('pagehide', () => {
+    try {
+      const b = new Blob([JSON.stringify({ clientId: cid })], { type: 'application/json' });
+      if (navigator.sendBeacon) navigator.sendBeacon('/api/client-leave', b);
+    } catch {}
+  });
+  // 关标签页时如果还有任务在跑，给个提示（浏览器允许的话）
+  window.addEventListener('beforeunload', (e) => {
+    if ((TASKS.list || []).length) { e.preventDefault(); e.returnValue = ''; return ''; }
+  });
+}
 
 /* ---------- 新建项目 ---------- */
 function newProjectDialog() {
@@ -994,6 +1256,307 @@ function newProjectDialog() {
   };
 }
 
+/* ---------- v1.1.4 项目补录：传两份文件，自动分析并归档 ---------- */
+let BF = null;
+
+function bfFilesHtml(list, kind) {
+  if (!list || !list.length) {
+    return '<div class="bf-none">还没有文件</div>';
+  }
+  return list.map((f, i) => '<div class="bf-file">' +
+    '<span class="bf-fname">' + esc(f.name) + '</span>' +
+    '<span class="bf-fsize">' + fmtSize(f.size) + '</span>' +
+    '<span class="bf-fok">✓</span>' +
+    '<button class="bf-fdel" data-bfdel="' + kind + '" data-i="' + i + '">移除</button>' +
+    '</div>').join('');
+}
+
+function bfRenderDrop(zoneId, kind, multi) {
+  const box = $('#' + zoneId);
+  if (!box) return;
+  const list = kind === 'tender' ? (BF.tender ? [BF.tender] : []) : BF.bids;
+  box.classList.toggle('has', list.length > 0);
+  const tip = $('#' + zoneId + 'Tip');
+  if (tip) tip.innerHTML = bfFilesHtml(list, kind);
+  box.querySelectorAll('[data-bfdel]').forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      const i = Number(b.dataset.i);
+      if (kind === 'tender') BF.tender = null; else BF.bids.splice(i, 1);
+      bfRenderDrop(zoneId, kind, multi);
+      bfRefreshBtn();
+    };
+  });
+}
+
+function bfRefreshBtn() {
+  const b = $('#bfGo');
+  if (!b) return;
+  const ok = !!(BF && BF.tender && BF.bids.length);
+  b.disabled = !ok || !!BF.busy;
+  b.textContent = BF && BF.busy ? '正在分析并归档…' : '分析并归档';
+}
+
+function bfBindDrop(zoneId, kind, multi) {
+  const box = $('#' + zoneId);
+  if (!box) return;
+  const input = $('#' + zoneId + 'Input');
+  box.onclick = () => { if (BF && !BF.busy) input.click(); };
+  input.onchange = () => { if (input.files && input.files.length) bfAddFiles(kind, Array.prototype.slice.call(input.files)); input.value = ''; };
+  box.ondragover = (e) => { e.preventDefault(); box.classList.add('hot'); };
+  box.ondragleave = () => box.classList.remove('hot');
+  box.ondrop = (e) => {
+    e.preventDefault();
+    box.classList.remove('hot');
+    if (!BF || BF.busy) return;
+    const fs2 = Array.prototype.slice.call(e.dataTransfer.files || []);
+    if (fs2.length) bfAddFiles(kind, fs2);
+  };
+}
+
+async function bfAddFiles(kind, files) {
+  if (!BF || BF.busy) return;
+  const zoneId = kind === 'tender' ? 'bfTender' : 'bfBid';
+  for (const f of files) {
+    const stage = kind === 'tender' ? 'tender' : 'draft';
+    const role = kind === 'tender' ? 'tenderFile' : 'uploaded';
+    try {
+      const r = await upload('/api/projects/' + BF.projectId + '/files?stage=' + stage + '&role=' + role, f);
+      const saved = (r.files || [])[0];
+      if (!saved || saved.error) { toast((saved && saved.error) || '上传失败', true); continue; }
+      const item = { id: saved.id, name: saved.name || f.name, size: saved.size || f.size };
+      if (kind === 'tender') BF.tender = item; else BF.bids.push(item);
+    } catch (e) { toast('上传失败：' + e.message, true); }
+  }
+  bfRenderDrop(zoneId, kind, kind !== 'tender');
+  bfRefreshBtn();
+}
+
+async function backfillDialog() {
+  let proj = null;
+  try {
+    proj = await api('POST', '/api/projects', {
+      name: '补录项目 ' + new Date().toLocaleDateString('zh-CN'),
+      isBackfill: true
+    });
+  } catch (e) { toast('建补录项目失败：' + e.message, true); return; }
+  BF = { projectId: proj.id, dir: proj.dir, tender: null, bids: [], busy: false, taskId: '' };
+
+  openModal('<h3>项目补录</h3>' +
+    '<p class="muted" style="margin-top:0;font-size:13px">已经投完的老项目，把两份文件拖进来就行。工作台会自动读文件、分析、整理章节，然后归档进知识库。</p>' +
+    '<div class="bf-grid">' +
+      '<div class="bf-col">' +
+        '<div class="bf-label">招标文件<span class="bf-req">必传 1 份</span></div>' +
+        '<div class="drop bf-drop" id="bfTender">' +
+          '<div class="bf-ico">📄</div>' +
+          '<div class="bf-h">把招标文件拖到这里</div>' +
+          '<div class="bf-p">或点一下选择文件（pdf / doc / docx 都行）</div>' +
+          '<div class="bf-tip" id="bfTenderTip"></div>' +
+          '<input type="file" id="bfTenderInput" accept=".pdf,.doc,.docx" style="display:none">' +
+        '</div>' +
+      '</div>' +
+      '<div class="bf-col">' +
+        '<div class="bf-label">投标文件<span class="bf-req">几份都行</span></div>' +
+        '<div class="drop bf-drop" id="bfBid">' +
+          '<div class="bf-ico">📑</div>' +
+          '<div class="bf-h">把投标文件拖到这里</div>' +
+          '<div class="bf-p">PDF / Word 都行，一份、两份、三份都可以，后台自动分辨是哪一份</div>' +
+          '<div class="bf-tip" id="bfBidTip"></div>' +
+          '<input type="file" id="bfBidInput" accept=".pdf,.doc,.docx" multiple style="display:none">' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="bf-progress" id="bfProg" style="display:none">' +
+      '<div class="bf-bar"><i id="bfBar"></i></div>' +
+      '<div class="bf-msg" id="bfMsg">正在准备…</div>' +
+      '<div class="bf-sub">正在分析中，分析完成后关闭并归档。中途不要关这个窗口。</div>' +
+    '</div>' +
+    '<div class="modal-foot"><button class="btn" data-close id="bfCancel">取消</button>' +
+    '<button class="btn primary" id="bfGo" disabled>分析并归档</button></div>');
+
+  bfRenderDrop('bfTender', 'tender', false);
+  bfRenderDrop('bfBid', 'bid', true);
+  bfBindDrop('bfTender', 'tender', false);
+  bfBindDrop('bfBid', 'bid', true);
+  bfRefreshBtn();
+
+  const cancel = $('#bfCancel');
+  if (cancel) cancel.onclick = async () => {
+    // v1.1.5：任务在跑时取消按钮锁死，只能二次确认停止
+    if (BF && BF.busy) { confirmStopBackfill(); return; }
+    const hasFile = BF && (BF.tender || BF.bids.length);
+    closeModal(true);
+    if (!hasFile && BF && BF.projectId) { try { await api('DELETE', '/api/projects/' + BF.projectId); } catch {} }
+    BF = null;
+    if (!hasFile) return;
+    await refreshProjects();
+    renderHome();
+  };
+
+  $('#bfGo').onclick = () => bfRun();
+}
+
+async function bfRun() {
+  if (!BF || BF.busy) return;
+  BF.busy = true;
+  bfRefreshBtn();
+  $('#bfTender').classList.add('disabled');
+  $('#bfBid').classList.add('disabled');
+  $('#bfProg').style.display = 'block';
+  setModalLock(true);   // v1.1.5：任务跑起来以后，这个弹窗关不掉了
+  const cancelBtn = $('#bfCancel');
+  if (cancelBtn) cancelBtn.textContent = '停止任务';
+  let taskId = '';
+  try {
+    const r = await api('POST', '/api/backfill', {
+      projectId: BF.projectId,
+      tenderFileId: BF.tender.id,
+      bidFileIds: BF.bids.map((x) => x.id)
+    });
+    taskId = r.taskId;
+    BF.taskId = taskId;
+  } catch (e) {
+    toast('启动失败：' + e.message, true);
+    BF.busy = false;
+    bfRefreshBtn();
+    setModalLock(false);
+    $('#bfProg').style.display = 'none';
+    $('#bfTender').classList.remove('disabled');
+    $('#bfBid').classList.remove('disabled');
+    return;
+  }
+  const steps = 6;
+  const tick = async () => {
+    if (!BF || BF.taskId !== taskId) return;
+    let t = null;
+    try { t = await api('GET', '/api/backfill/' + taskId); } catch (e) { t = null; }
+    if (!t) { setTimeout(tick, 2000); return; }
+    const pct = Math.max(8, Math.min(96, Math.round(((t.step || 0) + 0.6) / steps * 100)));
+    const bar = $('#bfBar');
+    if (bar) bar.style.width = pct + '%';
+    const msg = $('#bfMsg');
+    if (msg) msg.textContent = t.message || '正在处理…';
+    if (t.state === 'done') {
+      if (bar) bar.style.width = '100%';
+      if (msg) msg.textContent = '已归档完成';
+      BF.busy = false;
+      setModalLock(false);
+      const res = t.result || {};
+      closeModal(true);
+      BF = null;
+      goHome();
+      await refreshProjects();
+      showBackfillDone(res);
+      return;
+    }
+    if (t.state === 'failed') {
+      BF.busy = false;
+      setModalLock(false);
+      bfRefreshBtn();
+      // v1.1.5：补录失败，后台已经把这个补录项目删掉了，这里只负责把原因说清楚
+      const res = t.result || {};
+      closeModal(true);
+      BF = null;
+      goHome();
+      await refreshProjects();
+      showBackfillFailed(t, res);
+      return;
+    }
+    setTimeout(tick, 1500);
+  };
+  setTimeout(tick, 800);
+}
+
+// v1.1.5：补录任务在跑时点「停止任务」——二次确认后才真的停
+function confirmStopBackfill() {
+  openModal('<h3>要停止这个补录任务吗？</h3>' +
+    '<p class="muted" style="margin-top:0">任务还在跑。停止以后这次补录就作废了，已经上传的文件和刚建的补录项目会被删掉。</p>' +
+    '<div class="modal-foot"><button class="btn" id="bfKeep">继续跑（推荐）</button>' +
+    '<button class="btn danger" id="bfStop">确定停止</button></div>', { lock: false });
+  $('#bfKeep').onclick = () => { closeModal(true); backfillDialogAgain(); };
+  $('#bfStop').onclick = async () => {
+    const pid = BF && BF.projectId;
+    BF = null;
+    closeModal(true);
+    if (pid) { try { await api('DELETE', '/api/projects/' + pid); } catch {} }
+    toast('已停止，补录项目已删除');
+    goHome();
+    await refreshProjects();
+  };
+}
+
+// 从「继续跑」回来：把补录弹窗按原样重画（任务本身还在后台跑）
+function backfillDialogAgain() {
+  if (!BF) { backfillDialog(); return; }
+  const st = BF;
+  openModal('<h3>项目补录</h3>' +
+    '<p class="muted" style="margin-top:0;font-size:13px">任务还在后台跑，进度会接着显示。</p>' +
+    '<div class="bf-progress" id="bfProg" style="display:block">' +
+      '<div class="bf-bar"><i id="bfBar" style="width:20%"></i></div>' +
+      '<div class="bf-msg" id="bfMsg">正在处理…</div>' +
+      '<div class="bf-sub">中途不要关这个窗口。要停就点下面的「停止任务」。</div>' +
+    '</div>' +
+    '<div class="modal-foot"><button class="btn" data-close id="bfCancel">停止任务</button>' +
+    '<button class="btn primary" id="bfGo" disabled>分析并归档</button></div>', { lock: true });
+  const c = $('#bfCancel');
+  if (c) c.onclick = () => confirmStopBackfill();
+  const g = $('#bfGo');
+  if (g) g.onclick = () => bfRun();
+  const t0 = { step: 0 };
+  const steps = 6;
+  const tick = async () => {
+    if (!BF || BF !== st) return;
+    let t = null;
+    try { t = await api('GET', '/api/backfill/' + st.taskId); } catch { t = null; }
+    if (!t) { setTimeout(tick, 2000); return; }
+    const pct = Math.max(8, Math.min(96, Math.round(((t.step || 0) + 0.6) / steps * 100)));
+    const bar = $('#bfBar');
+    if (bar) bar.style.width = pct + '%';
+    const msg = $('#bfMsg');
+    if (msg) msg.textContent = t.message || '正在处理…';
+    if (t.state === 'done' || t.state === 'failed') { st.busy = false; return; }
+    setTimeout(tick, 1500);
+  };
+  setTimeout(tick, 600);
+}
+
+// v1.1.5：补录失败弹窗——说清原因，并告诉用户补录项目已经删掉了
+function showBackfillFailed(t, res) {
+  const why = (t && (t.error || t.message)) || '未知错误';
+  const tips = [];
+  if (/PDF/i.test(why)) tips.push('这份 PDF 可能是扫描件或加密文件，读不出文字。可以先用 Word 另存一份 PDF 再试，或者直接在项目里手工补录。');
+  if (/识别|OCR|图片/i.test(why)) tips.push('这台电脑的文字识别工具可能没装好，可以到「设置」里点「安装识别工具」再试一次。');
+  if (/Key|额度|401|403|超时/i.test(why)) tips.push('可能是 DeepSeek API Key 没填或额度用完了，可以到「设置」里检查一下。');
+  openModal('<h3>补录没成功</h3>' +
+    '<div class="bf-warn" style="margin-top:0">原因：' + esc(why) + '</div>' +
+    '<p class="muted" style="margin:12px 0 0">刚才为补录临时建的那个项目已经自动删掉了，项目列表里不会留半成品。</p>' +
+    (tips.length ? '<ul class="muted" style="margin:10px 0 0;padding-left:20px;font-size:13px">' + tips.map((x) => '<li>' + esc(x) + '</li>').join('') + '</ul>' : '') +
+    '<div class="modal-foot"><button class="btn" data-close>知道了</button>' +
+    '<button class="btn primary" id="bfRetry">重新补录</button></div>');
+  const b = $('#bfRetry');
+  if (b) b.onclick = () => { closeModal(true); backfillDialog(); };
+}
+
+function showBackfillDone(res) {
+  const kn = res.knowledge;
+  const imp = (res.imports || []).filter((x) => x.chapters);
+  const bad = (res.imports || []).filter((x) => x.error);
+  const meta = res.meta || {};
+  openModal('<h3>补录完成</h3>' +
+    '<div class="bf-done">' +
+      (meta.name ? '<div class="bf-done-row"><b>项目名称</b>' + esc(meta.name) + '</div>' : '') +
+      (meta.code ? '<div class="bf-done-row"><b>招标编号</b>' + esc(meta.code) + '</div>' : '') +
+      '<div class="bf-done-row"><b>归档位置</b>' + esc(res.relDir || '') + '</div>' +
+      '<div class="bf-done-row"><b>文件数</b>' + (res.files || 0) + ' 个</div>' +
+      (kn ? '<div class="bf-done-row"><b>知识库沉淀</b>技术 ' + (kn.tech || 0) + ' 章 / 商务 ' + (kn.biz || 0) + ' 章</div>' : '') +
+      (imp.length ? '<div class="bf-done-row"><b>整理到</b>' + imp.map((x) => esc(x.file) + '（' + x.chapters + ' 章）').join('、') + '</div>' : '') +
+    '</div>' +
+    (bad.length ? '<div class="bf-warn">有 ' + bad.length + ' 份文件没整理成章节：' + bad.map((x) => esc(x.file) + '（' + esc(x.error) + '）').join('；') + '。文件本身已经存进归档文件夹了。</div>' : '') +
+    (res.metaErr ? '<div class="bf-warn">基本信息没识别出来：' + esc(res.metaErr) + '。可以在项目里手动填。</div>' : '') +
+    (res.analysisErr ? '<div class="bf-warn">招标文件分析没做完：' + esc(res.analysisErr) + '。文件已归档，可以重新打开项目补做。</div>' : '') +
+    '<div class="modal-foot"><button class="btn primary" data-close>知道了</button></div>');
+}
+
 /* ---------- 设置 ---------- */
 async function settingsDialog() {
   const s = S.settings || (await api('GET', '/api/settings'));
@@ -1004,9 +1567,21 @@ async function settingsDialog() {
     '<div class="field"><label>模型</label><input id="stModel" value="' + esc(s.deepseekModel || 'deepseek-flash') + '"></div>' +
     '<div class="field"><label>投标单位名称</label><input id="stCompany" value="' + esc(s.company || '') + '" placeholder="用于标书封面，可留空"></div>' +
     '<div class="field full"><label>数据位置</label><input value="' + esc(rootPath()) + '" readonly></div>' +
+    '<div class="field full"><label>版本</label><input id="stVersion" value="' + esc((S.health && S.health.version) || '') + '" readonly><div class="hint">程序升级后这里会跟着变。</div></div>' +
+    '<div class="field full"><label>关闭网页时</label>' +
+      '<div class="ocr-box"><div class="ocr-row">' +
+        '<input type="checkbox" id="stAutoExit"' + (s.autoExitOnClose !== false ? ' checked' : '') + ' style="width:16px;height:16px">' +
+        '<span class="ocr-txt">关掉网页后自动关掉后台服务（如果还有任务在跑，会等任务跑完再关，最长等 30 分钟）</span>' +
+      '</div><div class="ocr-sub">关掉这一项，后台服务就一直开着，需要手动点「关闭工作台」才会退出。</div></div></div>' +
+    '<div class="field full"><label>文字识别（读扫描件用）</label>' +
+      '<div class="ocr-box" id="ocrBox"><span class="loading"></span> 正在检查…</div>' +
+      '<div class="hint">招标文件、投标文件如果是扫描件（图片），需要文字识别才能读出内容。工作台会先自动判断这台电脑有没有可用的识别工具。</div></div>' +
     '</div><div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okSet">保存</button></div>');
+  bindOcrBox();
   $('#okSet').onclick = async () => {
     const body = { deepseekModel: $('#stModel').value.trim(), company: $('#stCompany').value.trim() };
+    const ax = $('#stAutoExit');
+    if (ax) body.autoExitOnClose = !!ax.checked;
     const k = $('#stKey').value.trim();
     if (k) body.deepseekApiKey = k;
     try {
@@ -1019,6 +1594,39 @@ async function settingsDialog() {
   };
 }
 
+// v1.1.4：设置页里的「文字识别」状态与一键安装
+async function bindOcrBox() {
+  const box = $('#ocrBox');
+  if (!box) return;
+  const paint = (d) => {
+    if (!box.isConnected) return;
+    const ok = d.available;
+    box.innerHTML = '<div class="ocr-row"><span class="ocr-dot ' + (ok ? 'ok' : 'no') + '"></span>' +
+      '<span class="ocr-txt">' + esc(d.hint || '') + '</span></div>' +
+      (ok ? '' : '<button class="btn tiny" id="ocrInstall">安装识别工具</button>') +
+      '<div class="ocr-sub">' +
+        'Windows 自带：' + (d.winrt && d.winrt.ok ? '可用（' + esc((d.winrt.langs || []).join('、')) + '）' : '不可用') +
+        ' · Tesseract：' + (d.tesseract && d.tesseract.ok ? '已装' : '未装') +
+      '</div>';
+    const btn = $('#ocrInstall');
+    if (btn) btn.onclick = async () => {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="loading"></span> 正在下载安装，可能要几分钟…';
+      try {
+        const r = await api('POST', '/api/ocr/install', {});
+        toast('识别工具装好了');
+        const s2 = await api('GET', '/api/ocr/status');
+        paint(s2);
+        if (!r || !r.ok) toast('装完了但没检测到，可以重启工作台再试', true);
+      } catch (e) {
+        toast('安装失败：' + e.message, true);
+        if (btn.isConnected) { btn.disabled = false; btn.textContent = '重试安装'; }
+      }
+    };
+  };
+  try { paint(await api('GET', '/api/ocr/status')); }
+  catch (e) { box.textContent = '检查失败：' + e.message; }
+}
 /* ================= 页签：投标文件制作（模块3） ================= */
 S.df = null; // {projectId, draft, loading, doc, openChapter, taskId, timer, hasAnalysis, apiReady}
 
@@ -1063,8 +1671,10 @@ async function loadDraftFor(pid) {
   S.df = {
     projectId: pid, loading: false, draft: d.draft, hasAnalysis: d.hasAnalysis, apiReady: d.apiReady,
     doc: keepDoc && d.draft.docs[keepDoc] && (d.draft.mode !== 'merged' || keepDoc === 'merged') ? keepDoc : (d.draft.docs[firstKey] ? firstKey : Object.keys(d.draft.docs)[0]),
-    openChapter: keepOpen, redOnly: false
+    openChapter: keepOpen, redOnly: false, running: d.running || null, taskId: null, timer: null
   };
+  // v1.1.5：切回页面时把还在跑的写稿任务接上
+  if (d.running && d.running.taskId && !S.df.timer) dfPoll(d.running.taskId, true);
   // v1.1.0：把项目级专家画像一并读进来，章节面板才能显示「已确认 / 还没确认」
   if (!S.pf || S.pf.projectId !== pid) { try { await loadProfilesFor(pid); } catch {} }
   if (S.cur && S.cur.id === pid && S.tab === 'draft') renderProject();
@@ -1095,14 +1705,19 @@ function viewDraft() {
 
   /* 章节性质汇总条（v1.1.0） */
   const normalCh = (cur0.chapters || []).filter((c) => c.type === 'normal');
-  const nTech = normalCh.filter((c) => c.role === 'tech').length;
-  const nBiz = normalCh.filter((c) => c.role === 'biz').length;
-  const roleBar = normalCh.length
+  // v1.1.3：没生成框架、也没上传 Word 之前，框架里的章节还不算数 —— 统计必须是 0，别让用户以为已经标好了
+  const builtNow = !!cur0.built;
+  const nTech = builtNow ? normalCh.filter((c) => c.role === 'tech').length : 0;
+  const nBiz = builtNow ? normalCh.filter((c) => c.role === 'biz').length : 0;
+  const roleBar = normalCh.length || !builtNow
     ? '<div class="df-rolebar-sum">' +
         '<span class="muted">章节性质：</span>' +
         '<span class="tag role-tech">重要技术 ' + nTech + ' 章</span>' +
         '<span class="tag role-biz">重要商务 ' + nBiz + ' 章</span>' +
-        '<span class="muted" style="font-size:12px">蓝/紫标签的章节，AI 会用「技术专家 / 商务专家」模式写；标错了点一下标签就能改（技术 → 商务 → 不标注）。鼠标移到章节行右侧会出现「＋ 重要」。</span>' +
+        '<span class="muted" style="font-size:12px">' + (builtNow
+          ? '蓝/紫标签的章节，AI 会用「技术专家 / 商务专家」模式写；标错了点一下标签就能改（技术 → 商务 → 不标注）。鼠标移到章节行右侧会出现「＋ 重要」。'
+          : '还没生成框架、也还没上传 Word，所以现在是 0 章。生成框架或上传 Word 之后，工作台会按章节标题自动判断哪些属于重要技术、哪些属于重要商务，你也可以点「AI 复核章节性质」让 AI 再判一遍。') +
+        '</span>' +
       '</div>'
     : '';
 
@@ -1120,12 +1735,30 @@ function viewDraft() {
   /* 右：当前文件的章节 */
   let right = '';
   if (!cur0.built) {
+    // v1.1.3：两条路都留着 —— 可以让 AI 生成框架，也可以直接把自己写好的 Word 传上来读章节
     right = '<div class="card"><h3>' + esc(cur0.title) + '</h3>' +
-      '<p class="muted" style="margin-top:0;font-size:13px;max-width:680px">第一步是生成框架：AI 会按招标文件的要求，把这份文件该有哪些章节列出来（封面、目录、各级标题、索引表、偏离表），你可以在后面增删改。' +
-      '框架里不带正文，正文要逐章生成或者由你自己上传。</p>' +
-      (st.apiReady ? '<button class="btn primary" id="btnOutline">生成框架</button>'
-        : '<button class="btn primary" id="btnGoSettings2">先去设置 API Key</button>') +
-      '<span id="dfMsg" class="muted" style="margin-left:12px;font-size:13px"></span></div>';
+      '<p class="muted" style="margin-top:0;font-size:13px;max-width:700px">这一步有两条路，任选一条（也可以先传 Word，之后再让 AI 补章节）：</p>' +
+      '<div class="df-start">' +
+        '<div class="df-start-i">' +
+          '<div class="df-start-h">① 让 AI 生成框架</div>' +
+          '<div class="df-start-d">AI 按招标文件的要求，把这份文件该有哪些章节列出来（封面、目录、各级标题、索引表、偏离表），你可以在后面增删改。框架里不带正文。</div>' +
+          (st.apiReady ? '<button class="btn primary" id="btnOutline">生成框架</button>'
+            : '<button class="btn primary" id="btnGoSettings2">先去设置 API Key</button>') +
+        '</div>' +
+        '<div class="df-start-i">' +
+          '<div class="df-start-h">② 上传我自己写的 Word</div>' +
+          '<div class="df-start-d">直接把你写好的标书传上来，工作台按你 Word 里的标题层级读章节，完全按你的章节和顺序排列（只列一级、二级标题），编号也用你原来的。' +
+          (cur.status === 'archived' ? '' : '之后还能让 AI 逐章补正文。') + '</div>' +
+          '<div class="df-drop df-drop-lg" id="dfDrop">' +
+            '<div class="df-drop-ico">⇪</div>' +
+            '<div class="df-drop-t">把 Word 拖到这里</div>' +
+            '<div class="df-drop-p">或点下面的按钮选文件（.docx / .doc）</div>' +
+            '<button class="btn" id="btnImport">上传我写的 Word</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<input type="file" id="impInput" accept=".docx,.doc" style="display:none">' +
+      '<span id="dfMsg" class="muted" style="font-size:13px"></span></div>';
   } else {
     const rows = cur0.chapters.map((c, i) => {
       const isOpen = st.openChapter === c.id;
@@ -1139,7 +1772,7 @@ function viewDraft() {
           '<button class="btn tiny" data-ch="' + c.id + '" data-go="write">' + (chars ? '重写' : 'AI 写正文') + '</button>' +
           (chars ? '<button class="btn tiny" data-ch="' + c.id + '" data-go="expand">扩写</button>' : '')) +
           (c.role === 'tech' || c.role === 'biz'
-            ? '<button class="btn tiny indep" data-indep="' + c.id + '" title="开一个独立窗口，边聊边改，可以生成图/表并导出验收用 Word">独立编制</button>'
+            ? '<button class="btn tiny indep" data-indep="' + c.id + '" title="独立编制：开一个独立窗口，和 AI 边聊边改，可以生成图/表、导出验收用 Word">编制</button>'
             : '')
         : (needRow ? '<button class="btn tiny" data-ch="' + c.id + '" data-go="table">查看/编辑</button>' : '');
       const lv = Number(c.level) || 1;
@@ -1187,6 +1820,7 @@ function viewDraft() {
       '</div></div>' +
       '<input type="file" id="impInput" accept=".docx,.doc" style="display:none">' +
       '<div class="df-msg muted" id="dfMsg"></div>' +
+      (cur.status === 'archived' ? '' : '<div class="df-drop" id="dfDrop"><span>⇪ 把 Word 拖到这里，直接按你写的章节替换（.docx / .doc）</span></div>') +
       '<div class="df-chs">' + rows + '</div>';
   }
 
@@ -1242,6 +1876,25 @@ function chapterPanel(doc, c) {
 
 /* ---------- 模块3 事件 ---------- */
 function dfSetMsg(t) { const el = $('#dfMsg'); if (el) el.textContent = t; }
+
+// v1.1.4：上传/拖入 Word 后按标题层级读章节，整份替换当前文件
+async function dfDoImport(f) {
+  const st = S.df;
+  if (!st || !S.cur) return;
+  dfSetMsg('正在读取 ' + f.name + '…');
+  try {
+    const r = await upload('/api/projects/' + S.cur.id + '/draft/' + st.doc + '/import', f);
+    const list = (r.titles || []).slice(0, 12).map((t) => esc((t.number ? t.number + ' ' : '') + t.title)).join('、');
+    const deepNote = r.skippedDeep ? '三级及更深的 ' + r.skippedDeep + ' 个小标题已并入上一级章节正文。' : '';
+    openModal('<h3>已按你上传的标书替换</h3><p>文件：' + esc(f.name) + '</p>' +
+      '<p>现在这份文件完全按你上传的章节与顺序排列，只列一级、二级标题，共 <b>' + r.chapters + '</b> 章，序号用你 Word 里的原编号（之前的自动框架已备份，可以一键恢复）。</p>' +
+      (deepNote ? '<p class="muted" style="font-size:13px">' + deepNote + '</p>' : '') +
+      (list ? '<p class="muted" style="font-size:13px">前几章：' + list + (r.titles.length > 12 ? ' 等' : '') + '</p>' : '') +
+      '<div class="modal-foot"><button class="btn primary" data-close>好</button></div>');
+    dfSetMsg('');
+    await reloadDraft();
+  } catch (e) { dfSetMsg(''); toast(e.message, true); }
+}
 
 async function dfPatch(url, body, method) {
   return api(method || 'POST', url, body || {});
@@ -1452,20 +2105,23 @@ function bindDraftEvents() {
       const f = impIn.files[0];
       if (!f) return;
       impIn.value = '';
-      dfSetMsg('正在读取 ' + f.name + '…');
-      try {
-        const r = await upload('/api/projects/' + S.cur.id + '/draft/' + st.doc + '/import', f);
-        const list = (r.titles || []).slice(0, 12).map((t) => esc((t.number ? t.number + ' ' : '') + t.title)).join('、');
-        const deepNote = r.skippedDeep ? '三级及更深的 ' + r.skippedDeep + ' 个小标题已并入上一级章节正文。' : '';
-        openModal('<h3>已按你上传的标书替换</h3><p>文件：' + esc(f.name) + '</p>' +
-          '<p>现在这份文件完全按你上传的章节与顺序排列，只列一级、二级标题，共 <b>' + r.chapters + '</b> 章，序号用你 Word 里的原编号（之前的自动框架已备份，可以一键恢复）。</p>' +
-          (deepNote ? '<p class="muted" style="font-size:13px">' + deepNote + '</p>' : '') +
-          (list ? '<p class="muted" style="font-size:13px">前几章：' + list + (r.titles.length > 12 ? ' 等' : '') + '</p>' : '') +
-          '<div class="modal-foot"><button class="btn primary" data-close>好</button></div>');
-        $('#dfMsg').textContent = '';
-        await reloadDraft();
-      } catch (e) { dfSetMsg(''); toast(e.message, true); }
+      await dfDoImport(f);
     };
+    // v1.1.4：整块拖拽上传（拖到虚线框里就行，效果和点按钮一样）
+    const dz = $('#dfDrop');
+    if (dz) {
+      dz.onclick = (e) => { if (e.target === dz || dz.contains(e.target)) { if (!e.target.closest('button')) impIn.click(); } };
+      const on = (v) => dz.classList.toggle('hot', v);
+      dz.ondragover = (e) => { e.preventDefault(); on(true); };
+      dz.ondragleave = () => on(false);
+      dz.ondrop = async (e) => {
+        e.preventDefault(); on(false);
+        const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        if (!f) return;
+        if (!/\.(docx|doc)$/i.test(f.name)) { toast('只能拖 Word 文件（.docx / .doc）', true); return; }
+        await dfDoImport(f);
+      };
+    }
   }
 
   /* 恢复自动框架 */
@@ -1505,13 +2161,15 @@ async function reloadDraft() {
     const r = await api('GET', '/api/projects/' + S.cur.id + '/draft');
     if (!S.df) return;
     S.df.draft = r.draft; S.df.hasAnalysis = r.hasAnalysis; S.df.apiReady = r.apiReady; S.df.loading = false;
-    renderProject();
+    if (S.cur) renderProject();
   } catch (e) { toast(e.message, true); }
 }
 
-function dfPoll(taskId) {
+function dfPoll(taskId, silent) {
   if (S.df && S.df.timer) clearInterval(S.df.timer);
+  if (!S.df) return;
   S.df.taskId = taskId;
+  S.df.running = { taskId, message: '' };
   S.df.timer = setInterval(async () => {
     let t;
     try { t = await api('GET', '/api/draft-tasks/' + taskId); } catch { return; }
@@ -1520,6 +2178,7 @@ function dfPoll(taskId) {
     if (t.state !== 'running') {
       clearInterval(S.df.timer);
       S.df.timer = null;
+      S.df.running = null;
       if (t.state === 'error') toast('失败：' + t.message, true);
       else toast(t.message || '完成');
       await reloadDraft();
@@ -1715,9 +2374,11 @@ async function loadCheckFor(pid) {
       folds: new Set(),
       taskId: null,
       timer: null,
-      running: false,
-      msg: ''
+      running: !!(r.running && r.running.taskId),
+      msg: (r.running && r.running.message) || ''
     };
+    // v1.1.5：切回页面时把还在跑的核查任务接上
+    if (r.running && r.running.taskId && !S.ck.timer) ckPoll(r.running.taskId, true);
     renderProject();
   } catch (e) {
     toast(e.message, true);
@@ -2015,9 +2676,9 @@ function bindCheckEvents() {
   });
 }
 
-function ckPoll(taskId) {
+function ckPoll(taskId, silent) {
   if (S.ck && S.ck.timer) clearInterval(S.ck.timer);
-  if (S.ck) S.ck.taskId = taskId;
+  if (S.ck) { S.ck.taskId = taskId; S.ck.running = true; }
   S.ck.timer = setInterval(async () => {
     let t;
     try { t = await api('GET', '/api/check-tasks/' + taskId); t = t.task || t; } catch { return; }
@@ -2239,10 +2900,11 @@ function closeConfirmDialog(st, done, all, year) {
     try {
       const r = await api('POST', '/api/projects/' + S.cur.id + '/close', { note: $('#clNote').value.trim(), confirmText: '关闭归档' });
       closeModal();
+      goHome();
       await refreshProjects();
       showArchivedDialog(r);
-      S.tab = 'info';
-      await openProject(S.cur.id, true);
+      // v1.2.0：归档后知识卡在后台自动提炼，任务条上能看到进度
+      if (r.cardTaskId) { try { startTaskPolling(); pollActiveTasks(); } catch {} }
     } catch (e) {
       btn.disabled = false; btn.textContent = '关闭并归档';
       toast(e.message, true);
@@ -2274,10 +2936,9 @@ function abandonDialog(st) {
         mode: 'abandon', abandonReason: $('#abReason').value.trim(), confirmText: '关闭归档'
       });
       closeModal();
+      goHome();
       await refreshProjects();
       showArchivedDialog(r);
-      S.tab = 'info';
-      await openProject(S.cur.id, true);
     } catch (e) {
       btn.disabled = false; btn.textContent = '确认放弃并归档';
       toast(e.message, true);
@@ -2292,7 +2953,8 @@ function showArchivedDialog(r) {
       '重要技术 <b>' + (ks.tech || 0) + '</b> 章、重要商务 <b>' + (ks.biz || 0) + '</b> 章' +
       ((ks.hasProfile && (ks.hasProfile.tech || ks.hasProfile.biz)) ? '，专家画像 ' +
         [ks.hasProfile.tech ? '技术' : '', ks.hasProfile.biz ? '商务' : ''].filter(Boolean).join(' + ') + ' 各 1 份' : '') +
-      '。<br><span class="muted" style="font-size:13px">以后做同类项目时，AI 会参考这些经验（左侧「🧠 专家知识库」可以查看）。</span></div>'
+      '。<br><span class="muted" style="font-size:13px">以后做同类项目时，AI 会参考这些经验（左侧「🧠 专家知识库」可以查看）。</span></div>' +
+      (r.cardTaskId ? '<div class="card" style="background:#f2f7f2;border-color:#cfe3cf;margin-top:8px"><b>正在提炼知识卡…</b><br><span class="muted" style="font-size:13px">工作台会用 AI 把重要技术 / 商务内容提炼成一张张可以复用的知识卡，进度看左侧栏顶部的任务条，不用等它跑完。</span></div>' : '')
     : (r.knowledge && r.knowledge.error
         ? '<p class="warn-text">知识库这次没写成功：' + esc(r.knowledge.error) + '<br>不影响归档，可以到「专家知识库」页对这个项目点「补录」。</p>'
         : '<p class="muted" style="font-size:13px">这个项目没有标注重要技术/重要商务章节，所以知识库里没有内容。</p>');
@@ -2310,23 +2972,52 @@ async function renderArchiveList() {
     $('#main').innerHTML = '<div class="page"><div class="placeholder">读取归档失败：' + esc(e.message) + '</div></div>';
     return;
   }
-  const list = d.archives || [];
+  const all = d.archives || [];
+  const kw = String(S.archKw || '').trim().toLowerCase();
+  const list = all.filter((x) => !kw || [x.name, x.code, x.owner, x.year].map((v) => String(v || '')).join(' ').toLowerCase().includes(kw));
   const head = '<div class="page-head"><div><div class="page-title">已归档的项目</div>' +
-    '<div class="page-sub">关闭的项目都在这里，资料存在 D 盘，随时可以打开文件夹查看</div></div></div>';
-  const body = !list.length
+    '<div class="page-sub">关闭的项目都在这里，资料存在 D 盘，随时可以打开文件夹查看；按投标截止日期由近到远排列</div></div>' +
+    '<div class="page-actions"><button class="btn" id="archHome">🏠 回到首页</button></div></div>' +
+    '<div class="arch-search">' +
+      '<input id="archSearch" type="search" placeholder="查找归档项目：项目名称 / 招标人 / 招标编号" value="' + esc(S.archKw || '') + '" autocomplete="off">' +
+      '<span class="muted">共 ' + all.length + ' 个' + (kw ? '，匹配 ' + list.length + ' 个' : '') + '</span>' +
+    '</div>';
+  const body = !all.length
     ? '<div class="placeholder">还没有归档的项目。在「递交归档」页点「关闭项目并归档」就会出现在这里。</div>'
-    : '<div class="arch-list">' + list.map((a) =>
-        '<div class="arch-i"><div class="arch-h"><b>' + esc(a.name) + '</b>' +
+    : (!list.length
+      ? '<div class="placeholder">没有匹配「' + esc(S.archKw) + '」的归档项目。</div>'
+      : '<div class="arch-list">' + list.map((a) => {
+        const left = fmtLeft(a.bidDeadline);
+        const dlCls = left.cls === 'c-done' ? 'c-done' : left.cls;
+        const dlTxt = a.bidDeadline
+          ? esc(String(a.bidDeadline).replace('T', ' ').slice(0, 16)) + '　<span class="' + dlCls + '">' + esc(left.cls === 'c-done' ? '已过截止' : left.big) + '</span>'
+          : '<span class="muted">未设置投标截止日期</span>';
+        return '<div class="arch-i"><div class="arch-h"><b>' + esc(a.name) + '</b>' +
           (a.check && a.check.verdict === 'red' ? '<span class="tag tag-red">核查有问题</span>' : '') +
           (a.check && a.check.verdict === 'green' ? '<span class="tag tag-green">全部通过</span>' : '') +
         '</div>' +
         '<div class="arch-m">' + esc(a.code || '') + (a.owner ? ' · ' + esc(a.owner) : '') + (a.budget ? ' · 预算 ' + esc(a.budget) : '') + '</div>' +
+        '<div class="arch-dl">投标截止：' + dlTxt + '</div>' +
         '<div class="arch-p">' + esc(a.path) + '</div>' +
         '<div class="arch-a"><span class="muted">归档于 ' + esc(String(a.archivedAt).slice(0, 10)) + '</span>' +
-        '<button class="btn tiny" data-reveal="' + esc(a.path) + '">打开文件夹</button>' +
-        (a.projectId ? '<button class="btn tiny" data-reopen="' + esc(a.projectId) + '">重新打开</button>' : '') +
-        '</div></div>').join('') + '</div>';
+        '<span class="row" style="gap:6px">' +
+          '<button class="btn tiny" data-reveal="' + esc(a.path) + '">打开文件夹</button>' +
+          (a.projectId ? '<button class="btn tiny" data-reopen="' + esc(a.projectId) + '">重新打开</button>' : '') +
+          (a.projectId ? '<button class="btn tiny danger" data-archdel="' + esc(a.projectId) + '" data-name="' + esc(a.name) + '" data-path="' + esc(a.path) + '">删除</button>' : '') +
+        '</span></div></div>';
+      }).join('') + '</div>');
   $('#main').innerHTML = '<div class="page">' + head + body + '</div>';
+  const ah = $('#archHome');
+  if (ah) ah.onclick = () => goHome();
+  // v1.2.0：知识库页的「回到首页」（之前只画了按钮没绑事件，点了没反应）
+  const kh = $('#kbHome');
+  if (kh) kh.onclick = () => { S.archived = false; const ab2 = $('#btnArchived'); if (ab2) ab2.textContent = '查看已归档'; goHome(); };
+  const si = $('#archSearch');
+  if (si) {
+    si.oninput = () => { S.archKw = si.value; renderArchiveList(); };
+    si.focus();
+    const v = si.value; si.value = ''; si.value = v; // 光标停在末尾
+  }
   document.querySelectorAll('[data-reveal]').forEach((b) => {
     b.onclick = async () => {
       try { await api('POST', '/api/reveal', { path: b.dataset.reveal }); }
@@ -2336,8 +3027,45 @@ async function renderArchiveList() {
   document.querySelectorAll('[data-reopen]').forEach((b) => {
     b.onclick = () => reopenProject(b.dataset.reopen);
   });
+  document.querySelectorAll('[data-archdel]').forEach((b) => {
+    b.onclick = () => deleteArchivedProject(b.dataset.archdel, b.dataset.name, b.dataset.path);
+  });
 }
 
+/* v1.1.3：删除已归档项目 —— 归档文件夹、项目资料、知识库经验一并删掉，删前必须二次确认 */
+function deleteArchivedProject(pid, name, dirPath) {
+  openModal('<h3>删除已归档的项目</h3>' +
+    '<p>要删除的是：<b>' + esc(name || '') + '</b></p>' +
+    '<div class="card" style="background:#fdf3f3;border-color:#f3c9c9;padding:12px 14px;font-size:13px;line-height:1.9">' +
+      '<b style="color:#b6242e">删除后工作台空间内所有资料一并删除，请做好备份。</b><br>' +
+      '会被删掉的内容：<br>' +
+      '· 归档文件夹：<code style="font-size:12px">' + esc(dirPath || '') + '</code><br>' +
+      '· 项目工作目录里的全部文件（招标文件、分析、制作稿、核查报告等）<br>' +
+      '· 专家知识库里这个项目沉淀的经验记录<br>' +
+      '· 独立编制里的草稿与图表<br>' +
+      '<span class="muted">删除后无法恢复。</span>' +
+    '</div>' +
+    '<label class="chk-row" style="margin-top:12px"><input type="checkbox" id="ackDel"> 我已经把需要的资料备份好了</label>' +
+    '<div class="modal-foot"><button class="btn" data-close>取消</button>' +
+    '<button class="btn danger" id="okArchDel" disabled>确认删除</button></div>');
+  const ack = $('#ackDel');
+  const ok = $('#okArchDel');
+  ack.onchange = () => { ok.disabled = !ack.checked; };
+  ok.onclick = async () => {
+    if (!ack.checked) return;
+    ok.disabled = true; ok.textContent = '正在删除…';
+    try {
+      await api('DELETE', '/api/projects/' + pid);
+      closeModal();
+      toast('已删除，归档文件夹和资料都清理掉了');
+      await refreshProjects();
+      await renderArchiveList();
+    } catch (e) {
+      ok.disabled = false; ok.textContent = '确认删除';
+      toast(e.message, true);
+    }
+  };
+}
 
 function reopenProject(pid) {
   openModal('<h3>重新打开这个项目？</h3>' +
@@ -2364,8 +3092,8 @@ async function renderKnowledgeList() {
   }
   const list = d.projects || [];
   const head = '<div class="page-head"><div><div class="page-title">专家知识库</div>' +
-    '<div class="page-sub">每个项目关闭归档时，工作台会自动把这个项目的技术/商务重要章节、专家画像和生成记录沉淀到这里；以后做新项目时，AI 专家会参考同类项目的经验。</div></div>' +
-    '<div class="page-actions"><button class="btn" id="kbBackfill">从已有项目补录</button></div></div>';
+    '<div class="page-sub">每个项目关闭归档时，工作台会用 AI 把里面的重要技术 / 重要商务内容提炼成一张张「知识卡」（技术路线、具体做法、硬指标、管理机制、得分点、亮点、表格模板）。以后做新项目，AI 会优先参考这些知识卡，而不是照搬章节。</div></div>' +
+    '<div class="page-actions"><button class="btn" id="kbHome">🏠 回到首页</button><button class="btn" id="kbBackfill">从已有项目补录</button></div></div>';
   const empty = '<div class="placeholder">知识库还是空的。<br>等您把一个项目「关闭并归档」之后，这个项目的重要技术内容、重要商务内容、专家画像就会自动存进来。<br><br>' +
     '<span class="muted" style="font-size:13px">没有历史数据也不影响使用——AI 会按通用策略先建画像，数据越多越贴合您公司。</span></div>';
   const cards = list.map((k) => {
@@ -2380,7 +3108,9 @@ async function renderKnowledgeList() {
       '<div class="kb-m">' + esc(k.code || '') + (dirTxt ? ' · ' + esc(dirTxt) : '') + '</div>' +
       (broken ? '<div class="kb-warn">知识库里有记录，但这几份文件不见了：' + esc(k.missing.join('、')) +
         '。点「补录」可以按项目现有内容重建。</div>' : '') +
-      '<div class="kb-c"><span>重要技术 <b>' + (c.tech || 0) + '</b> 章</span><span>重要商务 <b>' + (c.biz || 0) + '</b> 章</span>' +
+      '<div class="kb-c"><span>知识卡 技术 <b>' + ((k.cardCounts && k.cardCounts.tech) || 0) + '</b> 张</span>' +
+        '<span>商务 <b>' + ((k.cardCounts && k.cardCounts.biz) || 0) + '</b> 张</span>' +
+        '<span class="muted">原章节 技术 ' + (c.tech || 0) + ' / 商务 ' + (c.biz || 0) + '</span>' +
         (k.purchaseMethod ? '<span>' + esc(k.purchaseMethod) + '</span>' : '') + '</div>' +
       '<div class="kb-a"><span class="muted">归档于 ' + esc(String(k.archivedAt || '').slice(0, 10)) + '</span>' +
         '<button class="btn tiny" data-kbfix="' + esc(k.projectId) + '">补录</button>' +
@@ -2401,6 +3131,9 @@ async function renderKnowledgeList() {
     : '';
   $('#main').innerHTML = '<div class="page">' + head + statBar +
     (list.length ? '<div class="kb-list">' + cards + '</div>' : empty) + '</div>';
+  // v1.2.0：知识库页的「回到首页」（之前只画了按钮没绑事件，点了没反应）
+  const kh = $('#kbHome');
+  if (kh) kh.onclick = () => { S.archived = false; const ab = $('#btnArchived'); if (ab) ab.textContent = '查看已归档'; goHome(); };
   const bf = $('#kbBackfill');
   if (bf) bf.onclick = () => backfillPicker();
   document.querySelectorAll('[data-kbfix]').forEach((b) => {
@@ -2483,6 +3216,12 @@ async function renderKnowledgeDetail(pid) {
   try { d = await api('GET', '/api/knowledge/' + pid); } catch (e) {
     toast(e.message, true); return;
   }
+  // v1.2.0：知识卡类型 + 这个项目的卡片
+  try {
+    if (!S.cardTypes) { const ct = await api('GET', '/api/card-types'); S.cardTypes = ct.types || []; }
+    const cc = await api('GET', '/api/knowledge/' + pid + '/cards');
+    S.kbCards = { projectId: pid, types: cc.types || [], cards: cc.cards || {} };
+  } catch (e) { S.kbCards = { projectId: pid, types: [], cards: {} }; }
   const k = d.knowledge || (d && d.record ? d : {});
   const rec = k.record || {};
   const chs = {
@@ -2491,13 +3230,50 @@ async function renderKnowledgeDetail(pid) {
   };
   const hist = (k.history && k.history.records) || [];
   const prof = k.profiles || {};
+  const indep = (k.indep && k.indep.sessions) || [];
+  // v1.1.4：章节里附带的图表（表格给行列，图片走原路径引用）
+  const kbCharts = (c) => {
+    const list = Array.isArray(c.charts) ? c.charts : [];
+    if (!list.length) return '';
+    const one = (x) => {
+      if (x.kind === 'table') {
+        const rows = Array.isArray(x.rows) ? x.rows : [];
+        if (!rows.length) return '';
+        const keys = Array.isArray(x.columns) && x.columns.length ? x.columns.map((v) => (v && typeof v === 'object' ? v.k : v)) : Object.keys(rows[0] || {});
+        const head = (Array.isArray(x.columns) && x.columns.length && typeof x.columns[0] === 'object')
+          ? x.columns.map((v) => esc(v.t || v.k)).join('')
+          : keys.map((k) => esc(k)).join('');
+        return '<div class="kb-chart"><div class="kb-chart-h">📊 ' + esc(x.title || '表格') + '（' + (x.rowCount || rows.length) + ' 行）</div>' +
+          '<div class="kb-tbl-wrap"><table class="tbl kb-tbl"><thead><tr>' + head + '</tr></thead><tbody>' +
+          rows.slice(0, 60).map((r) => '<tr>' + keys.map((k) => '<td>' + esc(String((r && r[k]) != null ? r[k] : '')) + '</td>').join('') + '</tr>').join('') +
+          '</tbody></table></div>' + (rows.length > 60 ? '<div class="muted" style="font-size:12px">只显示前 60 行</div>' : '') + '</div>';
+      }
+      if (x.kind === 'image') {
+        const base = String(x.pngRel || '').split('/').pop();
+        const url = base ? '/api/knowledge-image/' + encodeURIComponent(pid) + '/' + encodeURIComponent(base) : '';
+        return '<div class="kb-chart"><div class="kb-chart-h">🖼 ' + esc(x.title || x.caption || '图') + '</div>' +
+          (url ? '<a class="kb-img" href="' + url + '" target="_blank" rel="noopener"><img src="' + url + '" alt="' + esc(x.title || '') + '"></a>' : '<div class="muted" style="font-size:12px">图片文件已不在原位置</div>') +
+          (x.caption ? '<div class="muted" style="font-size:12px;margin-top:4px">' + esc(x.caption) + '</div>' : '') +
+          (x.reason ? '<div class="muted" style="font-size:12px">用途：' + esc(x.reason) + '</div>' : '') + '</div>';
+      }
+      return '';
+    };
+    return '<div class="kb-charts">' + list.map(one).join('') + '</div>';
+  };
   const block = (role, title, cls) => {
     const arr = chs[role] || [];
     return '<div class="card kb-sec"><div class="kb-sec-h"><span class="tag ' + cls + '">' + title + '</span>' +
       '<span class="muted">' + arr.length + ' 章</span></div>' +
-      (arr.length ? arr.map((c) => '<details class="kb-ch"><summary>' + esc((c.number ? c.number + ' ' : '') + c.title) +
-        ' <span class="muted">' + (String(c.body || '').length) + ' 字</span></summary>' +
-        '<pre class="kb-body">' + esc(String(c.body || '').slice(0, 4000)) + (String(c.body || '').length > 4000 ? '\n…（只显示前 4000 字）' : '') + '</pre></details>').join('')
+      (arr.length ? arr.map((c) => {
+        const cks = Array.isArray(c.charts) ? c.charts : [];
+        const nt = cks.filter((x) => x.kind === 'table').length;
+        const ni = cks.filter((x) => x.kind === 'image').length;
+        const cnt = (nt ? ' · 表 ' + nt : '') + (ni ? ' · 图 ' + ni : '');
+        return '<details class="kb-ch"><summary>' + esc((c.number ? c.number + ' ' : '') + c.title) +
+        ' <span class="muted">' + (String(c.body || '').length) + ' 字' + cnt + '</span></summary>' +
+        '<pre class="kb-body">' + esc(String(c.body || '').slice(0, 4000)) + (String(c.body || '').length > 4000 ? '\n…（只显示前 4000 字）' : '') + '</pre>' +
+        kbCharts(c) + '</details>';
+      }).join('')
         : '<div class="muted" style="font-size:13px;padding:6px 0">没有记录</div>') + '</div>';
   };
   const profBlock = (role, title, cls) => {
@@ -2513,13 +3289,72 @@ async function renderKnowledgeDetail(pid) {
           p.revisions.slice(-5).map((r) => esc(String(r.at || '').slice(0, 10)) + (r.note ? '（' + esc(r.note) + '）' : '')).join('、') + '</div>'
         : '') + '</div>';
   };
+  // v1.1.4：独立编制里画过的图/表，也在这里看得到（图片只存原路径引用）
+  const indepBlock = () => {
+    const list = indep.filter((x) => x && (String(x.text || '').trim() || (x.charts || []).length));
+    if (!list.length) return '';
+    return '<div class="card kb-sec"><div class="kb-sec-h"><span class="tag tag-gray">独立编制</span>' +
+      '<span class="muted">' + list.length + ' 章</span></div>' +
+      list.map((x) => {
+        const cks = Array.isArray(x.charts) ? x.charts : [];
+        const fake = { charts: cks.map((c) => ({
+          kind: (c.table && Array.isArray(c.table.rows)) ? 'table' : (c.pngRel ? 'image' : 'table'),
+          chartType: c.chartType || '', title: c.title || '', caption: c.caption || '', reason: c.reason || '',
+          pngRel: c.pngRel || '',
+          columns: (c.table && c.table.columns) || (c.spec && c.spec.columns) || null,
+          rows: (c.table && c.table.rows) || (c.spec && c.spec.rows) || [],
+          rowCount: ((c.table && c.table.rows) || (c.spec && c.spec.rows) || []).length
+        })) };
+        const cnt = (cks.length ? ' · 图表 ' + cks.length : '');
+        return '<details class="kb-ch"><summary>' + esc((x.chapterTitle || x.title || '未命名')) +
+          ' <span class="muted">' + (String(x.text || '').length) + ' 字' + cnt + '</span></summary>' +
+          '<pre class="kb-body">' + esc(String(x.text || '').slice(0, 4000)) + '</pre>' + kbCharts(fake) + '</details>';
+      }).join('') + '</div>';
+  };
+  // v1.2.0：知识卡区（核心）—— 可编辑、可新增、可删除、可重新提炼
+  const CARD_TYPES_LOCAL = (S.cardTypes || []);
+  const typeName = (k) => {
+    const x = CARD_TYPES_LOCAL.find((y) => y.key === k);
+    return x ? x.name : k;
+  };
+  const cardState = S.kbCards && S.kbCards.projectId === pid ? S.kbCards : null;
+  const cardsBlock = (role, title, cls) => {
+    const pack = cardState && cardState.cards ? cardState.cards[role] : null;
+    const list = (pack && pack.cards) || [];
+    const err = (pack && pack.extractError) || '';
+    const at = (pack && pack.extractedAt) || '';
+    const body = list.length
+      ? CARD_TYPES_LOCAL.map((tp) => {
+          const sub = list.filter((c) => c.type === tp.key);
+          if (!sub.length) return '';
+          return '<div class="kbc-group"><div class="kbc-group-h">' + esc(tp.name) + '<span class="muted">' + esc(tp.desc) + '</span></div>' +
+            sub.map((c) => '<div class="kbc" data-card="' + esc(c.id) + '" data-kind="' + role + '">' +
+              '<div class="kbc-h"><b>' + esc(c.title) + '</b>' +
+                '<span class="kbc-meta">★' + (c.quality || 3) + ' · 用过 ' + (c.usedCount || 0) + ' 次' + (c.edited ? ' · 已手改' : '') + '</span></div>' +
+              '<div class="kbc-body">' + esc(c.body) + '</div>' +
+              (c.tags && c.tags.length ? '<div class="kbc-tags">' + c.tags.map((x) => '<span>' + esc(x) + '</span>').join('') + '</div>' : '') +
+              '<div class="kbc-a"><button class="btn tiny" data-kbcedit="' + esc(c.id) + '" data-kind="' + role + '">编辑</button>' +
+                '<button class="btn tiny danger" data-kbcdel="' + esc(c.id) + '" data-kind="' + role + '">删除</button></div>' +
+            '</div>').join('') + '</div>';
+        }).join('')
+      : '<div class="muted" style="font-size:13px;padding:8px 0">还没有知识卡。' + (at ? '' : '点右上角「重新提炼」让 AI 从内容里提炼。') + '</div>';
+    return '<div class="card kb-sec"><div class="kb-sec-h"><span class="tag ' + cls + '">' + title + '知识卡</span>' +
+      '<span class="muted">' + list.length + ' 张' + (at ? ' · 提炼于 ' + esc(String(at).slice(0, 10)) : '') + '</span>' +
+      '<span style="flex:1"></span>' +
+      '<button class="btn tiny" data-kbcadd="' + role + '">＋ 手工新增</button>' +
+      '<button class="btn tiny" data-kbcextract="' + role + '">重新提炼</button></div>' +
+      (err ? '<div class="kb-warn">上次提炼有问题：' + esc(err) + '</div>' : '') +
+      body + '</div>';
+  };
+
   $('#main').innerHTML = '<div class="page">' +
     '<div class="page-head"><div><button class="btn tiny" id="kbBack">← 返回知识库</button>' +
     '<div class="page-title" style="margin-top:8px">' + esc(rec.name || '未命名项目') + '</div>' +
     '<div class="page-sub">' + esc(rec.code || '') + (rec.purchaseMethod ? ' · ' + esc(rec.purchaseMethod) : '') +
       (rec.archivedAt ? ' · 归档于 ' + esc(String(rec.archivedAt).slice(0, 10)) : '') + '</div></div></div>' +
+    cardsBlock('tech', '技术', 'tag-blue') + cardsBlock('biz', '商务', 'role-biz') +
     profBlock('tech', '技术专家', 'tag-blue') + profBlock('biz', '商务专家', 'role-biz') +
-    block('tech', '重要技术内容', 'tag-blue') + block('biz', '重要商务内容', 'role-biz') +
+    block('tech', '重要技术内容', 'tag-blue') + block('biz', '重要商务内容', 'role-biz') + indepBlock() +
     '<div class="card kb-sec"><div class="kb-sec-h"><span class="tag tag-gray">生成记录</span>' +
       '<span class="muted">' + hist.length + ' 条</span></div>' +
       (hist.length ? '<table class="tbl"><thead><tr><th>章节</th><th>性质</th><th>AI 生成次数</th><th>最终字数</th><th>是否保留</th></tr></thead><tbody>' +
@@ -2529,6 +3364,106 @@ async function renderKnowledgeDetail(pid) {
     '</div>';
   const back = $('#kbBack');
   if (back) back.onclick = () => renderKnowledgeList();
+  bindCardActions(pid);
+}
+
+/* v1.2.0：知识卡的增删改与重新提炼 */
+function bindCardActions(pid) {
+  document.querySelectorAll('[data-kbcadd]').forEach((b) => {
+    b.onclick = () => cardEditDialog(pid, b.dataset.kbcadd, null);
+  });
+  document.querySelectorAll('[data-kbcedit]').forEach((b) => {
+    b.onclick = () => cardEditDialog(pid, b.dataset.kind, b.dataset.kbcedit);
+  });
+  document.querySelectorAll('[data-kbcdel]').forEach((b) => {
+    b.onclick = async () => {
+      const kind = b.dataset.kind;
+      const id = b.dataset.kbcdel;
+      openModal('<h3>删除这张知识卡？</h3><p class="muted" style="margin-top:0">删掉以后，AI 编制标书时就不会再参考它了。</p>' +
+        '<div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn danger" id="okCardDel">删除</button></div>');
+      $('#okCardDel').onclick = async () => {
+        try {
+          await api('DELETE', '/api/knowledge/' + pid + '/cards/' + kind + '/' + id);
+          closeModal(true);
+          toast('已删除');
+          renderKnowledgeDetail(pid);
+        } catch (e) { toast(e.message, true); }
+      };
+    };
+  });
+  document.querySelectorAll('[data-kbcextract]').forEach((b) => {
+    b.onclick = () => cardExtractDialog(pid);
+  });
+}
+
+// 手工新增 / 编辑一张知识卡
+async function cardEditDialog(pid, kind, cardId) {
+  if (!S.cardTypes || !S.cardTypes.length) { try { const r = await api('GET', '/api/card-types'); S.cardTypes = r.types || []; } catch {} }
+  const types = S.cardTypes || [];
+  const pack = S.kbCards && S.kbCards.cards ? S.kbCards.cards[kind] : null;
+  const card = cardId ? ((pack && pack.cards) || []).find((c) => c.id === cardId) : null;
+  openModal('<h3>' + (card ? '编辑知识卡' : '新增知识卡') + '</h3>' +
+    '<div class="grid">' +
+      '<div class="field"><label>类型</label><select id="kceType">' +
+        types.map((t) => '<option value="' + esc(t.key) + '"' + (card && card.type === t.key ? ' selected' : '') + '>' + esc(t.name) + '</option>').join('') +
+      '</select></div>' +
+      '<div class="field"><label>重要程度（1～5）</label><select id="kceQ">' +
+        [5, 4, 3, 2, 1].map((n) => '<option value="' + n + '"' + (card && card.quality === n ? ' selected' : '') + '>' + n + ' 分</option>').join('') +
+      '</select><div class="hint">低于 3 分不会被 AI 采用</div></div>' +
+      '<div class="field full"><label>标题（不超过 20 字）</label><input id="kceTitle" value="' + esc(card ? card.title : '') + '" placeholder="例如：三级质量复核机制"></div>' +
+      '<div class="field full"><label>正文</label><textarea id="kceBody" rows="8" placeholder="写成可以直接抄进下一份标书的做法，60～400 字">' + esc(card ? card.body : '') + '</textarea></div>' +
+      '<div class="field full"><label>关键词（逗号分隔）</label><input id="kceTags" value="' + esc(card && card.tags ? card.tags.join('，') : '') + '" placeholder="例如：质量管理，复核，闭环"></div>' +
+    '</div>' +
+    '<div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okCardSave">保存</button></div>');
+  $('#okCardSave').onclick = async () => {
+    const body = {
+      kind,
+      type: $('#kceType').value,
+      quality: Number($('#kceQ').value) || 4,
+      title: $('#kceTitle').value.trim(),
+      body: $('#kceBody').value.trim(),
+      tags: $('#kceTags').value.split(/[，,、\s]+/).map((x) => x.trim()).filter(Boolean)
+    };
+    if (!body.title) { toast('请填标题', true); return; }
+    if (body.body.length < 20) { toast('正文太短了，至少写 20 个字', true); return; }
+    try {
+      if (card) await api('PUT', '/api/knowledge/' + pid + '/cards/' + kind + '/' + card.id, body);
+      else await api('POST', '/api/knowledge/' + pid + '/cards/add', body);
+      closeModal(true);
+      toast('已保存');
+      renderKnowledgeDetail(pid);
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
+// 重新提炼知识卡（老项目升级 / 不满意重跑）
+function cardExtractDialog(pid) {
+  openModal('<h3>重新提炼知识卡？</h3>' +
+    '<p class="muted" style="margin-top:0">AI 会重新读这个项目已沉淀的技术 / 商务内容，重新提炼一遍知识卡。<br>' +
+    '你自己手工加的和改过的卡片会保留，AI 提炼出来的会被替换。</p>' +
+    '<div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okKbEx">开始提炼</button></div>');
+  $('#okKbEx').onclick = async () => {
+    try {
+      const r = await api('POST', '/api/knowledge/' + pid + '/cards/extract');
+      closeModal(true);
+      toast('已开始提炼，进度在左侧任务条里');
+      kbCardPoll(pid, r.taskId);
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
+function kbCardPoll(pid, taskId) {
+  const tick = async () => {
+    let t = null;
+    try { t = await api('GET', '/api/card-tasks/' + taskId); } catch { t = null; }
+    if (!t) { setTimeout(tick, 2500); return; }
+    toast(t.message || '正在提炼…');
+    if (t.state === 'running') { setTimeout(tick, 2500); return; }
+    if (t.state === 'error') toast('提炼失败：' + (t.error || ''), true);
+    else toast(t.message || '提炼完成');
+    if (S.kbCards && S.kbCards.projectId === pid) renderKnowledgeDetail(pid);
+  };
+  setTimeout(tick, 1500);
 }
 
 /* ---------- 启动 ---------- */
@@ -2543,12 +3478,29 @@ async function loadHealth() {
 
 async function boot() {
   $('#btnNew').onclick = newProjectDialog;
+  // v1.1.5：左侧栏固定「回到首页」，任何页面都能一键回来（不会打断后台任务）
+  const bh = $('#btnHome');
+  if (bh) bh.onclick = () => { S.archived = false; const ab = $('#btnArchived'); if (ab) ab.textContent = '查看已归档'; goHome(); };
+  // v1.1.5：全局任务中心 + 心跳（关掉网页自动关服务）
+  startTaskPolling();
+  startHeartbeat();
   const btnKB = $('#btnKB');
   if (btnKB) btnKB.onclick = () => { S.archived = false; $('#btnArchived').textContent = '查看已归档'; renderKnowledgeList(); };
   $('#btnSettings').onclick = settingsDialog;
+  // v1.1.3：侧栏项目查找（边打边筛）
+  const ps = $('#projSearch');
+  if (ps) {
+    ps.value = S.projKw || '';
+    ps.oninput = () => { S.projKw = ps.value; renderSidebar(); };
+  }
   $('#btnArchived').onclick = async () => {
     S.archived = !S.archived;
     $('#btnArchived').textContent = S.archived ? '返回项目列表' : '查看已归档';
+    const nl = $('#navLabel');
+    if (nl) nl.textContent = S.archived ? '已归档的项目' : '我的项目';
+    if (ps) ps.placeholder = S.archived ? '查找归档项目（名称 / 招标人 / 编号）' : '查找项目（名称 / 招标人 / 编号）';
+    S.projKw = ''; S.archKw = '';
+    if (ps) ps.value = '';
     await refreshProjects();
     if (S.archived) {
       try { await renderArchiveList(); } catch (e) { toast(e.message, true); }
@@ -2558,15 +3510,18 @@ async function boot() {
   };
   await loadHealth();
   try { await refreshProjects(); } catch (e) { toast('读取项目列表失败：' + e.message, true); }
-  // 支持刷新后回到原项目
+  // 支持刷新后回到原项目；没有项目就显示首页
   const m = /^#\/p\/([^/]+)(?:\/([a-z]+))?/.exec(location.hash || '');
   if (m) {
     S.tab = m[2] || 'info';
     try { await openProject(decodeURIComponent(m[1]), true); } catch (e) {}
+  } else {
+    renderHome();
   }
   window.addEventListener('hashchange', () => {
     const mm = /^#\/p\/([^/]+)(?:\/([a-z]+))?/.exec(location.hash || '');
-    if (mm && (!S.cur || S.cur.id !== decodeURIComponent(mm[1]))) openProject(decodeURIComponent(mm[1]), true);
+    if (mm) { if (!S.cur || S.cur.id !== decodeURIComponent(mm[1])) openProject(decodeURIComponent(mm[1]), true); }
+    else if (S.cur) goHome();
   });
   // 每分钟刷新倒计时
   setInterval(() => { if (S.cur) renderSidebar(); }, 60000);

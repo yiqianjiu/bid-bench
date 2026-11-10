@@ -36,8 +36,9 @@ export const DOC_ORDER = ['price', 'biz', 'qual'];
 // v1.1.0：role 标识章节属于哪类"高质量内容" —— tech=重要技术、biz=重要商务、''=不标注（不自由编制或普通章节）
 function ch(title, type, hint, words) {
   const c = { id: uid('c_'), title, type: type || 'normal', hint: hint || '', words: words || 450, body: '', source: '', level: 0, number: '', noIdx: false, role: '', roleBy: '', updatedAt: '' };
-  c.role = guessRole(c);
-  if (c.role) c.roleBy = 'rule';
+  // v1.1.3：建框架时不再预打「重要技术 / 重要商务」标签。
+  // 规则粗判误判率不低，预打上去反而让用户以为 AI 判过了；改为建完框架后由用户点「AI 复核章节性质」
+  // 或自己点标签标注（guessRole 保留，作为 AI 复核失败时的兜底，见 server 的 review-roles 路由）。
   return c;
 }
 
@@ -78,13 +79,21 @@ export function applyRoleReview(doc, map) {
 }
 
 // AI 复核章节性质（一次调用判完整份文件），返回 {changed, map}
-export async function reviewRoles(doc) {
+export async function reviewRoles(doc, opts) {
   const list = (doc.chapters || []).filter((c) => c && c.type === 'normal');
   if (!list.length) return { changed: 0, map: {} };
+  const useFallback = !!(opts && opts.fallback);
   let raw;
   try {
     raw = await callJson(SYSTEM_ROLE_REVIEW, roleReviewUserPrompt(list), { maxTokens: 4000, timeoutMs: 180000, temperature: 0.1, reasoningEffort: 'none' });
   } catch (e) {
+    // v1.1.3：AI 复核失败时，如果调用方允许兜底，就用规则粗判（guessRole）先标一遍，
+    // 至少让用户有东西可改，而不是一片空白；标完的 roleBy='rule'，下次 AI 复核仍会覆盖。
+    if (useFallback) {
+      let n = 0;
+      list.forEach((c) => { if (c.roleBy === 'user') return; const g = guessRole(c); if (g !== c.role) { c.role = g; c.roleBy = g ? 'rule' : ''; n++; } });
+      return { changed: n, map: {}, fallback: true, error: String(e && e.message || e) };
+    }
     return { changed: 0, map: {}, error: String(e && e.message || e) };
   }
   const items = (raw && raw.items) || (Array.isArray(raw) ? raw : []);
@@ -705,6 +714,13 @@ function persist(t) { try { fs.writeFileSync(taskFile(t.id), JSON.stringify(t, n
 export function getDraftTask(id) {
   if (tasks.has(id)) return tasks.get(id);
   try { return JSON.parse(fs.readFileSync(taskFile(id), 'utf8')); } catch { return null; }
+}
+
+// v1.1.5：列出所有还在跑的写稿任务（首页任务中心用）
+export function listDraftTasks() {
+  const out = [];
+  tasks.forEach((t) => { if (t && t.state === 'running') out.push(t); });
+  return out;
 }
 const runKey = (pid, docKey, chapterId) => pid + '|' + (chapterId || '');
 

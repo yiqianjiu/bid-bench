@@ -7,6 +7,8 @@ import { docxToPdf, docToDocx, extractPdfText, extractDocxText, getPageInfo } fr
 import { apiReady } from './ai.mjs';
 import { aiRequirementCheck, aiDeepScore, guessKind, reqSectionsFor, flattenRequirements } from './checkAI.mjs';
 import { loadDraft } from './draft.mjs';
+import { renderPdfPages } from './extract.mjs';
+import { ocrImageFile, detectOcr } from './ocr.mjs';
 
 export const CHECK_DIR = path.join(DATA_DIR, '核查');
 const TASKS_DIR = path.join(CHECK_DIR, '.tasks');
@@ -411,7 +413,37 @@ async function checkOneDoc(project, src, analysis) {
   } catch {
     pageInfo = [];
   }
-  const text = pages.map((p) => p.text || '').join('\n');
+  let text = pages.map((p) => p.text || '').join('\n');
+
+  // v1.1.4：整份几乎没有文字（扫描件/图片版 PDF）时，用本机 OCR 补一遍文字，否则条款核对全是空的
+  if (text.replace(/\s/g, '').length < 200 && pages.length) {
+    const tool = detectOcr();
+    if (tool.available) {
+      const maxPage = Math.min(pages.length, 60);
+      const nums = [];
+      for (let i = 1; i <= maxPage; i++) nums.push(i);
+      try {
+        const imgs = await renderPdfPages(buf, nums, 2);
+        const os = await import('node:os');
+        const tmpDir = path.join(CONV_DIR, 'ocr');
+        fs.mkdirSync(tmpDir, { recursive: true });
+        for (const n of nums) {
+          const img = imgs.get(n);
+          if (!img) continue;
+          const fp = path.join(tmpDir, stamp + '_p' + n + '.png');
+          fs.writeFileSync(fp, img);
+          const r = await ocrImageFile(fp);
+          const got = String((r && r.text) || '').trim();
+          if (got && pages[n - 1]) pages[n - 1].text = got;
+          try { fs.unlinkSync(fp); } catch {}
+        }
+        text = pages.map((p) => p.text || '').join('\n');
+      } catch (e) {
+        // 识别失败不阻断核查，按原来的「文字核对不到」提示继续
+      }
+    }
+  }
+
   return { pages, pageInfo, text };
 }
 
@@ -434,6 +466,13 @@ export function getCheckTask(id) {
   const f = taskFile(id);
   if (fs.existsSync(f)) { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch {} }
   return null;
+}
+
+// v1.1.5：列出所有还在跑的核查任务（首页任务中心用）
+export function listCheckTasks() {
+  const out = [];
+  tasks.forEach((t) => { if (t && t.state === 'running') out.push(t); });
+  return out;
 }
 
 function pickScoreDoc(results) {

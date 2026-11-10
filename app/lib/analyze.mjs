@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { detectOcr } from './ocr.mjs';
 import path from 'node:path';
 import { DATA_DIR, ROOT } from './config.mjs';
 import { all, get, run, addEvent } from './db.mjs';
@@ -55,6 +56,13 @@ export function getTask(taskId) {
 export function runningTaskOf(projectId) {
   const id = runningByProject.get(projectId);
   return id ? getTask(id) : null;
+}
+
+// v1.1.5：列出所有还在跑的分析任务（首页任务中心用）
+export function listActiveTasks() {
+  const out = [];
+  tasks.forEach((t) => { if (t && t.state === 'running') out.push(t); });
+  return out;
 }
 
 // ---------- 工具 ----------
@@ -143,6 +151,7 @@ export function startAnalysis(db, projectId, opts) {
     failedSegments: [],
     truncated: false,
     error: '',
+    errorCode: '',
     startedAt: nowIso(),
     finishedAt: ''
   };
@@ -152,6 +161,7 @@ export function startAnalysis(db, projectId, opts) {
 
   runAnalysis(db, p, task, opts || {}).catch((e) => {
     task.state = 'failed';
+    task.errorCode = (e && e.code) || '';
     task.error = String((e && e.message) || e);
     task.message = '分析失败：' + task.error;
     task.finishedAt = nowIso();
@@ -177,6 +187,7 @@ function segmentPages(pageCount) {
 
 async function runAnalysis(db, p, task, opts) {
   ensureAnalysisDirs();
+  const local = detectOcr();
 
   // 1) 选招标文件
   let f = null;
@@ -197,14 +208,20 @@ async function runAnalysis(db, p, task, opts) {
 
   // 扫描件先识别前 12 页，判断能否自动分析
   if (cache.scanned || cache.chars < 200) {
-    task.message = '这份文件像是扫描件，正在用 AI 读图…';
+    task.message = local.available ? '这份文件像是扫描件，正在用本机 OCR 识别…' : '这份文件像是扫描件，正在用 AI 读图…';
     persistTask(task);
     const probe = Math.max(1, Math.min(cache.pageCount || 12, 12));
     const pages = [];
     for (let i = 1; i <= probe; i++) pages.push(i);
     const r = await ocrPages(f, filePath, pages);
     cache = r.cache;
-    if (cache.chars < 200) throw new Error('这份文件是图片扫描件，AI 读不出文字。请上传可复制文字的版本，或到「招标文件」页签挑页手动识别。');
+    if (cache.chars < 200) {
+      const e = new Error(local.available
+        ? '这份文件是图片扫描件，本机 OCR 也没能识别出文字。可以换一份更清晰的扫描件，或到「招标文件」页签挑页手动识别。'
+        : '这份文件是图片扫描件，这台电脑暂时没有可用的文字识别工具。到「设置」页点「安装识别工具」，装好后会自动重新识别。');
+      e.code = local.available ? 'OCR_EMPTY' : 'NO_OCR_TOOL';
+      throw e;
+    }
   }
 
   const pageCount = cache.pageCount || (cache.pages || []).length;

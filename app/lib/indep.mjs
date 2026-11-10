@@ -1,6 +1,7 @@
 // v1.1.2 独立编制：针对「重要技术 / 重要商务」章节，开一个独立窗口与 AI 多轮对话，
 // 生成验收用的 Word（不按投标文件版式，方便粘贴回正式标书），并可把结果写回正文。
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { DATA_DIR, PROJECT_DIR } from './config.mjs';
 import { uid, nowIso, safeName } from './util.mjs';
@@ -385,8 +386,8 @@ export async function applyUpdate(project, session, analysis) {
   return session;
 }
 
-/* ---------------- 导出 Word（验收用草稿，不按投标文件版式） ---------------- */
-export async function exportDraftWord(project, session, outDir) {
+/* ---------------- 生成 Word（验收用草稿，不按投标文件版式） ---------------- */
+export async function buildChapterDocx(session) {
   const {
     Document, Packer, Paragraph, TextRun, AlignmentType, ImageRun, Table, TableRow, TableCell,
     WidthType, BorderStyle, ShadingType, TableLayoutType
@@ -573,7 +574,11 @@ export async function exportDraftWord(project, session, outDir) {
     styles: { default: { document: { run: { font: FONT, size: 24 } } } },
     sections: [{ properties: { page: { size: { width: A4.width, height: A4.height }, margin: MARGIN } }, children: kids }]
   });
-  const buf = await Packer.toBuffer(doc);
+  return Packer.toBuffer(doc);
+}
+
+export async function exportDraftWord(project, session, outDir) {
+  const buf = await buildChapterDocx(session);
   const dir = outDir || defaultOutDir(project);
   fs.mkdirSync(dir, { recursive: true });
   const ts = stamp();
@@ -584,6 +589,135 @@ export async function exportDraftWord(project, session, outDir) {
   session.exports = (session.exports || []).concat([{ at: nowIso(), file }]).slice(-30);
   saveSession(session);
   return { file, dir, bytes: buf.length };
+}
+
+/* ---------------- PDF 真实版面预览（v1.1.3） ---------------- */
+// 稿件 Word → PDF → 逐页 PNG。按 text+charts 的签名缓存，稿子没改就直接用上次渲染的图。
+function previewDir(pid, cid) { return path.join(INDEP_DIR, pid, safeName(cid), '预览'); }
+
+function previewSig(session) {
+  const raw = String(session.text || '') + '||' + (session.charts || []).map((c) => [c.id, c.afterText || '', c.caption || '', c.at || ''].join('~')).join('|') + '||' + (session.hints || []).map((h) => h.text || '').join('|');
+  return crypto.createHash('sha1').update(raw).digest('hex').slice(0, 16);
+}
+
+export function loadPreview(pid, cid) {
+  const dir = previewDir(pid, cid);
+  const metaFile = path.join(dir, 'meta.json');
+  if (!fs.existsSync(metaFile)) return null;
+  try {
+    const m = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+    if (!Array.isArray(m.pages) || !m.pages.length) return null;
+    return m;
+  } catch { return null; }
+}
+
+export async function renderPreview(project, session, force) {
+  const pid = session.projectId, cid = session.chapterId;
+  const sig = previewSig(session);
+  const old = loadPreview(pid, cid);
+  if (!force && old && old.sig === sig) return old;
+
+  const { docxToPdf, renderPdfPages, getPdfTextPos } = await import('./extract.mjs');
+  const dir = previewDir(pid, cid);
+  fs.mkdirSync(dir, { recursive: true });
+  // 清掉上一次的图，避免新旧混在一起
+  for (const f of fs.readdirSync(dir)) { try { fs.unlinkSync(path.join(dir, f)); } catch {} }
+
+  const docxBuf = await buildChapterDocx(session);
+  const docxFile = path.join(dir, 'preview.docx');
+  fs.writeFileSync(docxFile, docxBuf);
+  const pdfFile = path.join(dir, 'preview.pdf');
+  docxToPdf(docxFile, pdfFile);
+  const pdfBuf = fs.readFileSync(pdfFile);
+  const pos = await getPdfTextPos(pdfBuf);
+  const total = pos.length || 1;
+  const want = [];
+  for (let i = 1; i <= Math.min(total, 200); i++) want.push(i);
+  const imgs = await renderPdfPages(pdfBuf, want, 1.6);
+
+  const pages = [];
+  for (const p of pos) {
+    const buf = imgs.get(p.page);
+    if (!buf) continue;
+    const name = 'p' + String(p.page).padStart(3, '0') + '.png';
+    fs.writeFileSync(path.join(dir, name), buf);
+    // 记下每行文字的纵向位置（用于把配图挂到对应段落右侧）
+    const lines = [];
+    const sorted = p.items.slice().sort((a, b) => (b.y - a.y) || (a.x - b.x));
+    for (const it of sorted) {
+      const last = lines[lines.length - 1];
+      if (last && Math.abs(last.y - it.y) <= 3) { last.text += it.str; last.x2 = Math.max(last.x2, it.x + it.str.length * 7); }
+      else lines.push({ y: it.y, x: it.x, x2: it.x + it.str.length * 7, text: it.str });
+    }
+    pages.push({
+      page: p.page, w: Math.round(p.width), h: Math.round(p.height), img: name,
+      lines: lines.map((l) => ({ y: Math.round((p.height - l.y) * 10) / 10, text: l.text.slice(0, 80) })).slice(0, 400)
+    });
+  }
+  const meta = { sig, at: nowIso(), total: pages.length, pages };
+  fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta), 'utf8');
+  return meta;
+}
+
+export function previewPageFile(pid, cid, name) {
+  return path.join(previewDir(pid, cid), path.basename(String(name || '')));
+}
+
+/* ---------------- 单张表格导出 Word（v1.1.3：表格只给 .docx，不给图片） ---------------- */
+export async function chartDocx(session, chartId) {
+  const {
+    Document, Packer, Paragraph, TextRun, AlignmentType, Table, TableRow, TableCell,
+    WidthType, BorderStyle, ShadingType, TableLayoutType
+  } = await import('docx');
+  const FONT = '宋体', HEI = '黑体';
+  const A4 = { width: 11906, height: 16838 };
+  const MARGIN = { top: 1440, bottom: 1440, left: 1418, right: 1418 };
+  const TEXT_W = A4.width - MARGIN.left - MARGIN.right;
+  const c = (session.charts || []).find((x) => x.id === chartId);
+  if (!c) throw new Error('这张表不存在了');
+  const cols = (c.table && c.table.columns) || [];
+  const rows = (c.table && c.table.rows) || [];
+  if (!cols.length) throw new Error('这张表没有内容');
+  const weights = cols.map((col, i) => {
+    const lens = [String(col).length * 2].concat(rows.map((r) => String(r[i] == null ? '' : r[i]).length));
+    return Math.max(6, Math.min(60, Math.round(lens.reduce((a, b) => a + b, 0) / lens.length)));
+  });
+  const sum = weights.reduce((a, b) => a + b, 0) || 1;
+  const widths = weights.map((w) => Math.max(700, Math.round((w / sum) * TEXT_W)));
+  const border = { style: BorderStyle.SINGLE, size: 4, color: '808080' };
+  const cellP = (text, i, head) => new TableCell({
+    width: { size: widths[i], type: WidthType.DXA },
+    shading: head ? { type: ShadingType.CLEAR, fill: 'EDF2F7', color: 'auto' } : undefined,
+    margins: { top: 60, bottom: 60, left: 90, right: 90 },
+    children: [new Paragraph({
+      alignment: head ? AlignmentType.CENTER : AlignmentType.LEFT, spacing: { line: 300 },
+      children: [new TextRun({ text: String(text == null ? '' : text), font: FONT, size: 21, bold: !!head, color: '000000' })]
+    })]
+  });
+  const kids = [];
+  kids.push(new Paragraph({
+    alignment: AlignmentType.CENTER, spacing: { after: 160 },
+    children: [new TextRun({ text: c.caption || c.title || '表', font: HEI, size: 26, bold: true, color: '000000' })]
+  }));
+  kids.push(new Table({
+    layout: TableLayoutType.FIXED,
+    width: { size: TEXT_W, type: WidthType.DXA },
+    columnWidths: widths,
+    borders: { top: border, bottom: border, left: border, right: border, insideHorizontal: border, insideVertical: border },
+    rows: [new TableRow({ tableHeader: true, children: cols.map((x, i) => cellP(x, i, true)) })]
+      .concat(rows.map((r) => new TableRow({ children: cols.map((_, i) => cellP(r[i], i, false)) })))
+  }));
+  if (c.reason) kids.push(new Paragraph({
+    spacing: { before: 160 }, alignment: AlignmentType.CENTER,
+    children: [new TextRun({ text: '说明：' + c.reason, font: FONT, size: 18, color: '808080' })]
+  }));
+  const doc = new Document({
+    styles: { default: { document: { run: { font: FONT, size: 21 } } } },
+    sections: [{ properties: { page: { size: { width: A4.width, height: A4.height }, margin: MARGIN } }, children: kids }]
+  });
+  const buf = await Packer.toBuffer(doc);
+  const name = safeName((c.title || c.caption || '表格').slice(0, 24)) + '.docx';
+  return { buf, name };
 }
 
 export function defaultOutDir(project) {

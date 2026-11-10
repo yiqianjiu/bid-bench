@@ -6,24 +6,27 @@ import { loadConfig, ensureDirs, WEB_DIR, DATA_DIR, UPLOAD_DIR, PROJECT_DIR, ARC
 import { openDb, all, get, run, addEvent } from './lib/db.mjs';
 import { uid, sha256, nowIso, safeName, shortName } from './lib/util.mjs';
 import { extractArchive, listFilesRecursive, renderPdfPages, docToDocx, extractDocxText } from './lib/extract.mjs';
-import { ensureText, readTextCache, ocrPages, buildFullText, ensureTextDirs } from './lib/text.mjs';
+import { ensureText, readTextCache, ocrPages, buildFullText, ensureTextDirs, outlineOfBidFile as outlineOfPdfFile, splitTextByHeading } from './lib/text.mjs';
 import { callJson, apiReady } from './lib/ai.mjs';
 import { SYSTEM_META, metaUserPrompt, SECTIONS } from './lib/prompt.mjs';
-import { startAnalysis, getTask, loadAnalysis, saveAnalysis, runningTaskOf, ensureAnalysisDirs } from './lib/analyze.mjs';
+import { startAnalysis, getTask, loadAnalysis, saveAnalysis, runningTaskOf, ensureAnalysisDirs, listActiveTasks } from './lib/analyze.mjs';
 import { exportAnalysisDocx } from './lib/exportAnalysis.mjs';
-import { ensureDraft, saveDraft, loadDraft, setMode, refreshTables, startOutlineTask, startChapterTask, getDraftTask, DOC_META, ensureDraftDirs, applyUploadedOutline, restoreAutoOutline, reviewRoles, setChapterRole } from './lib/draft.mjs';
+import { ensureDraft, saveDraft, loadDraft, setMode, makeDoc, refreshTables, startOutlineTask, startChapterTask, getDraftTask, listDraftTasks, DOC_META, ensureDraftDirs, applyUploadedOutline, restoreAutoOutline, reviewRoles, setChapterRole } from './lib/draft.mjs';
 import { generateProfile, getProfile, confirmProfile, loadProfiles, profileHeadline, blankProfile, PROFILE_KINDS, KIND_LABEL } from './lib/profile.mjs';
-import { listKnowledge, getKnowledge, removeKnowledge, buildReferenceBlock, findSimilar } from './lib/knowledge.mjs';
+import { listKnowledge, getKnowledge, removeKnowledge, buildReferenceBlock, findSimilar, syncCardCount } from './lib/knowledge.mjs';
+// v1.2.0：知识卡（把章节里的重要内容提炼成可复用的卡片）
+import { startCardTask, getCardTask, listCardTasks, listCards, updateCard, addCard, deleteCard, readCards, saveCards, CARD_TYPES, TYPE_NAME } from './lib/cards.mjs';
 import { parseDocxOutline } from './lib/docxOutline.mjs';
 import { exportDraftDocx } from './lib/exportDraft.mjs';
-import { loadCheck, saveCheck, listSources, startCheckTask, getCheckTask, ensureCheckDirs } from './lib/check.mjs';
+import { loadCheck, saveCheck, listSources, startCheckTask, getCheckTask, ensureCheckDirs, listCheckTasks } from './lib/check.mjs';
 import { exportCheckDocx } from './lib/exportCheck.mjs';
 import { GROUPS, ensureSubmit, rebuildSubmit, saveSubmit, loadSubmit, ensureSubmitDirs } from './lib/submit.mjs';
 import { exportSubmitDocx } from './lib/exportSubmit.mjs';
-import { archiveProject, listArchives, rebuildKnowledgeFor } from './lib/archive.mjs';
+import { archiveProject, listArchives, rebuildKnowledgeFor, archiveRelDirOf } from './lib/archive.mjs';
 import { ensureProcDirs, appendProcess, loadProcess, copyProcessTo, pruneData } from './lib/process.mjs';
-import { ensureIndepDirs, ensureSession, loadSession, saveSession, listSessions, generateDraft, chatWithAI, applyUpdate, exportDraftWord, writeBack, defaultOutDir, redoChart, reworkChart, envCheck, clientSession, redoAllCharts } from './lib/indep.mjs';
+import { ensureIndepDirs, ensureSession, loadSession, saveSession, listSessions, generateDraft, chatWithAI, applyUpdate, exportDraftWord, writeBack, defaultOutDir, redoChart, reworkChart, envCheck, clientSession, redoAllCharts, renderPreview, loadPreview, previewPageFile, chartDocx } from './lib/indep.mjs';
 import { browserStatus } from './lib/chart.mjs';
+import { detectOcr, installTesseract, resetOcrCache } from './lib/ocr.mjs';
 
 const cfg = loadConfig();
 ensureDirs();
@@ -116,7 +119,8 @@ route('GET', '/api/settings', async (req, res) => {
   json(res, 200, {
     port: cfg.port, deepseekBaseUrl: cfg.deepseekBaseUrl, deepseekModel: cfg.deepseekModel,
     deepseekApiKeyMasked: cfg.deepseekApiKey ? cfg.deepseekApiKey.slice(0, 6) + '****' + cfg.deepseekApiKey.slice(-4) : '',
-    hasKey: !!cfg.deepseekApiKey, company: cfg.company || ''
+    hasKey: !!cfg.deepseekApiKey, company: cfg.company || '',
+    autoExitOnClose: cfg.autoExitOnClose !== false, version: cfg.version || ''
   });
 });
 
@@ -125,6 +129,7 @@ route('POST', '/api/settings', async (req, res) => {
   const patch = {};
   if (typeof body.deepseekApiKey === 'string' && body.deepseekApiKey.trim() && !body.deepseekApiKey.includes('****')) patch.deepseekApiKey = body.deepseekApiKey.trim();
   if (typeof body.company === 'string') patch.company = body.company.trim();
+  if (typeof body.autoExitOnClose === 'boolean') patch.autoExitOnClose = body.autoExitOnClose;
   if (typeof body.deepseekModel === 'string' && body.deepseekModel.trim()) patch.deepseekModel = body.deepseekModel.trim();
   const saved = saveConfig(patch);
   Object.assign(cfg, saved);
@@ -183,15 +188,56 @@ route('POST', '/api/projects/:id', async (req, res, ctx) => {
   json(res, 200, { ok: true });
 });
 
-route('DELETE', '/api/projects/:id', async (req, res, ctx) => {
-  const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.id);
-  if (!p) return json(res, 404, { error: '项目不存在' });
+// 把一个项目彻底删干净（磁盘 + 知识库 + 数据库），删除项目与补录失败清理共用
+function deleteProjectFully(p) {
+  const removed = [];
+  // 1) 归档文件夹（已归档的项目才有；位置记在 archiveNote 里，格式「备注||年份\编号_项目名」）
+  const rel = archiveRelDirOf(p);
+  if (rel) {
+    const dst = path.resolve(ARCHIVE_DIR, rel);
+    if (dst.startsWith(path.resolve(ARCHIVE_DIR)) && fs.existsSync(dst)) {
+      fs.rmSync(dst, { recursive: true, force: true });
+      removed.push(dst);
+    }
+  }
+  // 2) 项目工作目录
+  const dir = projectDirOf(p);
+  if (dir.startsWith(PROJECT_DIR) && fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    removed.push(dir);
+  }
+  // 3) 独立编制草稿、过程记录、分析与制作缓存
+  const extras = [
+    path.join(DATA_DIR, '独立编制', p.id),
+    path.join(DATA_DIR, '过程', p.id + '.json'),
+    path.join(DATA_DIR, '分析', p.id + '.json'),
+    path.join(DATA_DIR, '制作', p.id + '.json')
+  ];
+  for (const f of extras) {
+    if (!fs.existsSync(f)) continue;
+    if (!f.startsWith(path.resolve(DATA_DIR))) continue;
+    fs.rmSync(f, { recursive: true, force: true });
+    removed.push(f);
+  }
+  // 4) 专家知识库里这个项目的经验记录
+  try { removeKnowledge(p.id); } catch {}
+  // 5) 数据库三张表
   run(db, 'DELETE FROM files WHERE projectId = ?', p.id);
   run(db, 'DELETE FROM events WHERE projectId = ?', p.id);
   run(db, 'DELETE FROM projects WHERE id = ?', p.id);
-  const dir = projectDirOf(p);
-  if (dir.startsWith(PROJECT_DIR) && fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
-  json(res, 200, { ok: true });
+  return removed;
+}
+
+// v1.1.3：删除项目 —— 在办项目和已归档项目都能删，归档的连归档文件夹一起删干净
+route('DELETE', '/api/projects/:id', async (req, res, ctx) => {
+  const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.id);
+  if (!p) return json(res, 404, { error: '项目不存在' });
+  try {
+    const removed = deleteProjectFully(p);
+    json(res, 200, { ok: true, removed });
+  } catch (e) {
+    json(res, 500, { error: '删除失败：' + String(e && e.message || e) });
+  }
 });
 
 // ---------- 文件 ----------
@@ -226,7 +272,7 @@ route('POST', '/api/projects/:id/files', async (req, res, ctx) => {
       insertFile(p.id, id, stage, role, origName, stored, rel, buf.length, sha256(buf));
       saved.push({ id, name: origName, size: buf.length, relPath: rel });
       addEvent(db, p.id, 'upload', '上传文件 ' + origName);
-  appendProcess(p.id, { kind: 'upload', title: '上传文件：' + origName, detail: (stage === 'tender' ? '招标文件' : '其他资料') + '，' + fmtSizeSoft(f.size) });
+  appendProcess(p.id, { kind: 'upload', title: '上传文件：' + origName, detail: (stage === 'tender' ? '招标文件' : '其他资料') + '，' + fmtSizeSoft(buf.length) });
 
       // 压缩包：解压后把里面的文档一并登记
       if (ext === '.zip' || ext === '.rar' || ext === '.7z') {
@@ -357,6 +403,35 @@ route('POST', '/api/files/:id/ocr', async (req, res, ctx) => {
   json(res, 200, { ok: true, results: r.results, pages: r.cache.pages });
 });
 
+// ---------- 文字识别（OCR）能力 ----------
+// 需要 AI 读文件时先自动判断：本机有识别工具就用本机的，没有就建议用户装，装完自动可用。
+route('GET', '/api/ocr/status', async (req, res) => {
+  const d = detectOcr();
+  json(res, 200, {
+    ok: true,
+    available: d.available,
+    best: d.best,
+    winrt: d.winrt,
+    tesseract: d.tesseract,
+    winget: d.winget.ok,
+    hint: d.available
+      ? (d.best === 'winrt' ? '这台电脑自带的文字识别可以用（Windows OCR）。' : '这台电脑装了 Tesseract 文字识别。')
+      : (d.winget.ok
+        ? '这台电脑还没有文字识别工具，点「安装识别工具」可以自动装一个（大约几十 MB，只需一次）。'
+        : '这台电脑还没有文字识别工具，也没法自动安装，需要手动装一个。')
+  });
+});
+
+route('POST', '/api/ocr/install', async (req, res) => {
+  try {
+    const r = installTesseract();
+    resetOcrCache();
+    json(res, 200, Object.assign({ ok: true }, r));
+  } catch (e) {
+    json(res, 400, { ok: false, error: String(e && e.message || e), code: (e && e.code) || '' });
+  }
+});
+
 // ---------- AI：识别项目基本信息 ----------
 route('POST', '/api/projects/:id/extract-meta', async (req, res, ctx) => {
   const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.id);
@@ -387,7 +462,7 @@ route('POST', '/api/projects/:id/extract-meta', async (req, res, ctx) => {
       work = r.cache;
       visionUsed = pagesToRead;
     } catch (e) {
-      return json(res, 400, { error: '这份文件像是扫描件，AI 读图失败：' + String(e && e.message || e) });
+      return json(res, 400, { error: '这份文件像是扫描件，识别文字失败：' + String(e && e.message || e) });
     }
   }
 
@@ -432,6 +507,8 @@ route('POST', '/api/projects/:id/analyze', async (req, res, ctx) => {
 });
 
 route('GET', '/api/tasks/:taskId', async (req, res, ctx) => {
+  // v1.1.5：/api/tasks/active 必须在这里先拦一下，否则会被当成任务 ID
+  if (ctx.params.taskId === 'active') return json(res, 200, { ok: true, tasks: activeTasksOf(), serverTime: nowIso() });
   const t = getTask(ctx.params.taskId);
   if (!t) return json(res, 404, { error: '任务不存在' });
   json(res, 200, t);
@@ -562,7 +639,10 @@ route('GET', '/api/projects/:id/draft', async (req, res, ctx) => {
   if (!p) return json(res, 404, { error: '项目不存在' });
   const d = ensureDraft(p.id);
   const an = loadAnalysis(p.id);
-  json(res, 200, { ok: true, draft: d, hasAnalysis: !!an, analysisAt: an ? an.analysisAt : null, apiReady: apiReady() });
+  // v1.1.5：把还在跑的写稿任务一起返回，页面切回来能接着显示进度
+  let running = null;
+  try { const t = listDraftTasks().find((x) => x.projectId === p.id); if (t) running = { taskId: t.id, message: t.message || '' }; } catch {}
+  json(res, 200, { ok: true, draft: d, hasAnalysis: !!an, analysisAt: an ? an.analysisAt : null, apiReady: apiReady(), running });
 });
 
 route('POST', '/api/projects/:id/draft/mode', async (req, res, ctx) => {
@@ -746,6 +826,393 @@ route('POST', '/api/projects/:id/draft/:doc/import', async (req, res, ctx) => {
   });
 });
 
+// ---------- v1.1.4：项目补录一键归档 ----------
+// 用户只做一件事：传招标文件 + 传投标文件（几份都行），点「分析并归档」。
+// 剩下全自动：建项目 → 读招标文件基本信息 → 分析关键信息 → 拆投标文件章节 → 判章节性质 → 关闭归档 + 进知识库。
+const backfillTasks = new Map();
+
+function bfTaskOf(id) {
+  const t = backfillTasks.get(id);
+  if (!t) return null;
+  return { id: t.id, projectId: t.projectId, state: t.state, step: t.step, steps: t.steps, message: t.message, error: t.error, result: t.result, cleaned: t.cleaned || null, startedAt: t.startedAt, finishedAt: t.finishedAt };
+}
+
+function bfSet(t, step, message) {
+  t.step = step;
+  t.message = message;
+  t.updatedAt = nowIso();
+}
+
+route('POST', '/api/backfill', async (req, res) => {
+  const body = await readJson(req);
+  const pid0 = String(body.projectId || '');
+  const proj0 = pid0 ? get(db, 'SELECT * FROM projects WHERE id = ?', pid0) : null;
+  if (!proj0) return json(res, 400, { error: '补录项目不存在，请重新打开补录窗口' });
+  const tenderId = String(body.tenderFileId || '');
+  const bidIds = Array.isArray(body.bidFileIds) ? body.bidFileIds : [];
+  if (!tenderId) return json(res, 400, { error: '请先传一份招标文件' });
+  if (!bidIds.length) return json(res, 400, { error: '请至少传一份投标文件' });
+
+  const tf = get(db, 'SELECT * FROM files WHERE id = ?', tenderId);
+  if (!tf) return json(res, 400, { error: '招标文件没找到，请重新上传' });
+  const bids = all(db, 'SELECT * FROM files WHERE id IN (' + bidIds.map(() => '?').join(',') + ')', ...bidIds);
+  if (!bids.length) return json(res, 400, { error: '投标文件没找到，请重新上传' });
+
+  const id = uid('t_');
+  const t = {
+    id, projectId: pid0, state: 'running', step: 0,
+    steps: ['读招标文件', '识别基本信息', '分析关键信息', '整理投标文件', '判断章节性质', '关闭归档'],
+    message: '正在准备…', error: '', result: null,
+    startedAt: nowIso(), finishedAt: ''
+  };
+  backfillTasks.set(id, t);
+
+  // 后台跑，前端轮询 /api/backfill/:id
+  (async () => {
+    try {
+      // 1) 用已经建好的补录项目（文件已经传到它自己的目录里）
+      bfSet(t, 0, '正在准备项目…');
+      const pid = pid0;
+      const dir = proj0.dir;
+      const tender = tf;
+      const bidMoved = bids;
+      // 投标文件统一标成 draft 阶段的上传稿
+      bidMoved.forEach((f) => run(db, 'UPDATE files SET stage = ?, role = ? WHERE id = ?', 'draft', 'uploaded', f.id));
+
+      // 3) 读招标文件 → 识别基本信息
+      bfSet(t, 1, '正在读招标文件…');
+      const tenderAbs = path.join(ROOT, tender.relPath);
+      let meta = null;
+      let metaErr = '';
+      if (apiReady()) {
+        try {
+          let cache = await ensureText(tender, tenderAbs);
+          if (cache.scanned || cache.chars < 200) {
+            const probe = Math.max(1, Math.min(cache.pageCount || 12, 12));
+            const pages = [];
+            for (let i = 1; i <= probe; i++) pages.push(i);
+            const r = await ocrPages(tender, tenderAbs, pages);
+            cache = r.cache;
+          }
+          let full = buildFullText(cache.pages);
+          if (full.length > 120000) full = full.slice(0, 120000) + '\n\n（以下内容过长已截断）';
+          if (full.trim().length >= 100) {
+            meta = await callJson(SYSTEM_META, metaUserPrompt(full), { maxTokens: 4000 });
+            const fields = ['code', 'name', 'owner', 'agency', 'budget', 'bidDeadline', 'openTime', 'openPlace', 'deposit', 'purchaseMethod', 'packageNo', 'company', 'notes'];
+            const sets = [];
+            const vals = [];
+            fields.forEach((k) => {
+              const v = String((meta && meta[k]) || '').trim();
+              if (v) { sets.push(k + ' = ?'); vals.push(v); }
+            });
+            if (sets.length) {
+              sets.push('updatedAt = ?');
+              vals.push(nowIso(), pid);
+              run(db, 'UPDATE projects SET ' + sets.join(', ') + ' WHERE id = ?', ...vals);
+            }
+          } else {
+            metaErr = '招标文件里没读到足够文字';
+          }
+        } catch (e) {
+          metaErr = String(e && e.message || e);
+        }
+      } else {
+        metaErr = '没有填 DeepSeek API Key，跳过 AI 识别';
+      }
+
+      // 4) 分析招标文件（生成关键信息清单）
+      bfSet(t, 2, '正在分析招标文件…');
+      let analysisErr = '';
+      let analysisWarn = '';
+      if (apiReady()) {
+        try {
+          const task = startAnalysis(db, pid, {});
+          const deadline = Date.now() + 20 * 60 * 1000;
+          while (Date.now() < deadline) {
+            const cur = getTask(task.taskId);
+            if (!cur) break;
+            // v1.1.5：partial（部分段落没跑通）也算分析结束，不能再等下去
+            if (cur.state === 'done' || cur.state === 'partial') {
+              if (cur.state === 'partial') {
+                const n = (cur.failedSegments || []).length;
+                analysisWarn = '分析完成，但有 ' + n + ' 段没跑通（不影响后面整理）';
+              }
+              break;
+            }
+            if (cur.state === 'failed') { analysisErr = cur.error || '分析失败'; break; }
+            bfSet(t, 2, '正在分析招标文件…' + (cur.message ? '（' + cur.message + '）' : ''));
+            await new Promise((r) => setTimeout(r, 2500));
+          }
+        } catch (e) {
+          analysisErr = String(e && e.message || e);
+        }
+      } else {
+        analysisErr = '没有填 DeepSeek API Key，跳过分析';
+      }
+
+      // 5) 整理投标文件：几份就收几份，自动判断各是哪一份
+      bfSet(t, 3, '正在整理投标文件…');
+      const d = ensureDraft(pid);
+      d.mode = bidMoved.length > 1 ? 'split' : 'merged';
+      d.docs = {};
+      if (d.mode === 'merged') d.docs.merged = makeDoc('merged');
+      else ['price', 'biz', 'qual'].forEach((k) => { d.docs[k] = makeDoc(k); });
+      const used = {};
+      const pending = [];
+      bidMoved.forEach((f) => {
+        const k = d.mode === 'merged' ? 'merged' : guessDocKeyByFile(f.originalName);
+        if (k && !used[k]) used[k] = f; else pending.push(f);
+      });
+      pending.forEach((f) => {
+        if (!used.biz) used.biz = f;
+        else used.biz = Array.isArray(used.biz) ? used.biz.concat([f]) : [used.biz, f];
+      });
+      const importReport = [];
+      for (const key of Object.keys(used)) {
+        const arr = Array.isArray(used[key]) ? used[key] : [used[key]];
+        const doc = d.docs[key] || (d.docs[key] = makeDoc(key));
+        let first = true;
+        for (const f of arr) {
+          const abs = path.join(ROOT, f.relPath);
+          if (!fs.existsSync(abs)) { importReport.push({ key, file: f.originalName, error: '文件不在磁盘' }); continue; }
+          let chunks = [];
+          try { chunks = await outlineOfBidFile(abs, f.originalName, f); } catch (e) { importReport.push({ key, file: f.originalName, error: String(e && e.message || e) }); continue; }
+          if (!chunks.length) { importReport.push({ key, file: f.originalName, error: '没读到章节' }); continue; }
+          if (first) { applyUploadedOutline(doc, chunks, f.originalName); first = false; }
+          else {
+            chunks.forEach((c) => {
+              const tt = String(c.title || '').trim();
+              if (!tt) return;
+              doc.chapters.push({ id: uid('c_'), title: tt, type: 'normal', hint: '', words: 0, body: String(c.body || '').trim(), source: 'upload', level: Number(c.level) || 1, number: String(c.number == null ? '' : c.number), noIdx: true, role: '', roleBy: '', updatedAt: nowIso() });
+            });
+          }
+          importReport.push({ key, file: f.originalName, chapters: chunks.length });
+        }
+      }
+      Object.keys(d.docs).forEach((k) => { if (!used[k]) delete d.docs[k]; });
+      saveDraft(pid, d);
+
+      // 6) 判章节性质（重要技术 / 重要商务），归档时才挑得对
+      bfSet(t, 4, '正在判断哪些章节是重要内容…');
+      let roleErr = '';
+      if (apiReady()) {
+        for (const key of Object.keys(d.docs || {})) {
+          const doc = d.docs[key];
+          if (!doc || !(doc.chapters || []).length) continue;
+          try { await reviewRoles(doc, { fallback: true }); } catch (e) { roleErr = String(e && e.message || e); }
+        }
+        saveDraft(pid, d);
+      } else {
+        roleErr = '没有填 DeepSeek API Key，跳过章节判断';
+      }
+
+      // 7) 关闭归档 + 进知识库
+      bfSet(t, 5, '正在归档…');
+      const proj = get(db, 'SELECT * FROM projects WHERE id = ?', pid);
+      const ar = archiveProject(proj, db, { note: '项目补录自动归档', sessions: listSessions(pid) });
+      run(db, 'UPDATE projects SET status = ?, closedAt = ?, archiveNote = ?, closedBy = ?, updatedAt = ? WHERE id = ?',
+        'archived', nowIso(), '项目补录自动归档||' + ar.relDir, 'backfill', nowIso(), pid);
+      addEvent(db, pid, 'archive', '补录归档到 ' + ar.relDir);
+      appendProcess(pid, { kind: 'archive', title: '补录一键归档', detail: '归档目录：' + ar.relDir + '\n文件数：' + ar.files });
+
+      // v1.2.0：补录归档后自动提炼知识卡
+      let bfCardTaskId = '';
+      try {
+        const kc = ar.knowledgeChapters;
+        if (kc && ((kc.tech || []).length || (kc.biz || []).length) && apiReady()) {
+          bfCardTaskId = startCardTask(proj, kc, {}).id;
+        }
+      } catch (e) { console.log('[TWB] 补录知识卡提炼没启动：' + (e && e.message || e)); }
+
+      const kn = ar.knowledge && !ar.knowledge.error ? ar.knowledge : null;
+      t.state = 'done';
+      t.finishedAt = nowIso();
+      t.message = '已归档';
+      t.result = {
+        projectId: pid,
+        dir: ar.dir, relDir: ar.relDir, files: ar.files,
+        meta, metaErr, analysisErr, roleErr,
+        imports: importReport,
+        knowledge: kn ? { tech: (kn.counts && kn.counts.tech) || 0, biz: (kn.counts && kn.counts.biz) || 0, hasProfile: kn.hasProfile || {} } : null,
+        knowledgeErr: ar.knowledge && ar.knowledge.error ? ar.knowledge.error : '',
+        cardTaskId: bfCardTaskId
+      };
+    } catch (e) {
+      t.state = 'failed';
+      t.error = String(e && e.message || e);
+      t.message = '补录失败：' + t.error;
+      t.finishedAt = nowIso();
+      // v1.1.5：补录失败就把这个补录项目删掉，别在项目列表里留一个半成品
+      try {
+        const failedProj = get(db, 'SELECT * FROM projects WHERE id = ?', pid0);
+        if (failedProj) {
+          t.cleaned = deleteProjectFully(failedProj);
+          t.message = '补录失败，已把这个补录项目删掉。原因：' + t.error;
+        }
+      } catch (e2) {
+        t.message = '补录失败：' + t.error + '（自动清理没成功：' + String(e2 && e2.message || e2) + '）';
+      }
+    }
+  })();
+
+  json(res, 200, { ok: true, taskId: id, task: bfTaskOf(id) });
+});
+
+route('GET', '/api/backfill/:id', async (req, res, ctx) => {
+  const t = bfTaskOf(ctx.params.id);
+  if (!t) return json(res, 404, { error: '任务不存在' });
+  json(res, 200, t);
+});
+
+// ---------- v1.1.4：项目补录（投完的老项目，传两份文件就自动归档） ----------
+// 补录时上传几份投标文件就收几份，由后台按文件名与章节内容自动判断它们分别是哪一份。
+const BID_DOC_RULES = [
+  { key: 'price', re: /价格|报价|开标一览|分项报价|投标函|报价一览/ },
+  { key: 'qual', re: /资格|资质|证明文件|营业执照|审查/ },
+  { key: 'biz', re: /商务|技术|施工组织|服务方案|技术方案|响应文件/ }
+];
+
+function guessDocKeyByFile(fileName) {
+  const n = String(fileName || '');
+  for (const r of BID_DOC_RULES) if (r.re.test(n)) return r.key;
+  return '';
+}
+
+async function outlineOfBidFile(absPath, name, fileRow) {
+  const ext = path.extname(name).toLowerCase();
+  // v1.1.5：PDF 也能读（扫描件自动走本机 OCR / AI 看图）
+  if (ext === '.pdf') {
+    const row = fileRow || { id: path.basename(absPath).replace(/[^\w]/g, '_'), originalName: name, relPath: '' };
+    return await pdfOutlineOfBidFile(row, absPath);
+  }
+  if (ext !== '.docx' && ext !== '.doc') {
+    const err = new Error('目前只能读 PDF 或 Word 格式的投标文件（.pdf / .docx / .doc），这份是 ' + (ext || '未知格式'));
+    err.code = 'BAD_FORMAT';
+    throw err;
+  }
+  let buf = fs.readFileSync(absPath);
+  if (ext === '.doc') {
+    const tmpIn = path.join(os.tmpdir(), 'twb_bf_' + Date.now() + '.doc');
+    const tmpOut = path.join(os.tmpdir(), 'twb_bf_' + Date.now() + '.docx');
+    fs.writeFileSync(tmpIn, buf);
+    try { buf = docToDocx(tmpIn, tmpOut); } finally { try { fs.unlinkSync(tmpIn); } catch {} try { fs.unlinkSync(tmpOut); } catch {} }
+  }
+  let chunks = [];
+  try { const o = parseDocxOutline(buf, { maxLevel: 2 }); chunks = (o && o.chapters) || []; } catch (e) { chunks = []; }
+  if (!chunks.length) {
+    let text = '';
+    try { text = await extractDocxText(buf); } catch (e) { text = ''; }
+    chunks = splitByHeading(text).map((c) => ({ title: c.title, level: 1, number: '', body: c.body }));
+  }
+  return chunks;
+}
+
+// v1.1.5：PDF 投标文件按标题切章（切不出来就按页切）
+async function pdfOutlineOfBidFile(fileRow, absPath) {
+  try {
+    return await outlineOfPdfFile(fileRow, absPath);
+  } catch (e) {
+    const err = new Error('这份 PDF 没能读出文字：' + String(e && e.message || e));
+    err.code = (e && e.code) || 'PDF_EXTRACT_FAILED';
+    throw err;
+  }
+}
+
+// 把上传的投标文件切成章节，放进制作稿（几份文件就建几份，自动判断各是哪一份）
+route('POST', '/api/projects/:id/backfill/import', async (req, res, ctx) => {
+  const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.id);
+  if (!p) return json(res, 404, { error: '项目不存在' });
+  const body = await readJson(req);
+  const ids = Array.isArray(body.fileIds) ? body.fileIds : [];
+  let files = ids.length
+    ? all(db, 'SELECT * FROM files WHERE projectId = ? AND id IN (' + ids.map(() => '?').join(',') + ')', p.id, ...ids)
+    : all(db, "SELECT * FROM files WHERE projectId = ? AND stage = 'draft' ORDER BY uploadedAt ASC", p.id);
+  files = files.filter((f) => /\.(pdf|docx|doc)$/i.test(f.originalName || ''));
+  if (!files.length) return json(res, 400, { error: '没有找到可读的投标文件（PDF / Word 都行）' });
+
+  const d = ensureDraft(p.id);
+  d.mode = files.length > 1 ? 'split' : 'merged';
+  d.docs = {};
+  if (d.mode === 'merged') {
+    d.docs.merged = makeDoc('merged');
+  } else {
+    ['price', 'biz', 'qual'].forEach((k) => { d.docs[k] = makeDoc(k); });
+  }
+
+  const used = {};
+  const report = [];
+  const pending = [];
+  for (const f of files) {
+    let key = guessDocKeyByFile(f.originalName);
+    if (d.mode === 'merged') key = 'merged';
+    if (!key) { pending.push(f); continue; }
+    if (used[key]) { pending.push(f); continue; }
+    used[key] = f;
+  }
+  // 认不出是哪一份的，一律并进「商务技术文件」（正文主体），不往价格文件里塞
+  for (const f of pending) {
+    if (!used.biz) used.biz = f;
+    else used.biz = Array.isArray(used.biz) ? used.biz.concat([f]) : [used.biz, f];
+  }
+
+  for (const key of Object.keys(used)) {
+    const arr = Array.isArray(used[key]) ? used[key] : [used[key]];
+    const doc = d.docs[key] || (d.docs[key] = makeDoc(key));
+    let first = true;
+    for (const f of arr) {
+      const abs = fileAbs(f);
+      if (!fs.existsSync(abs)) { report.push({ key, file: f.originalName, error: '文件已不在磁盘' }); continue; }
+      let chunks = [];
+      try { chunks = await outlineOfBidFile(abs, f.originalName, f); } catch (e) { report.push({ key, file: f.originalName, error: String(e && e.message || e) }); continue; }
+      if (!chunks.length) { report.push({ key, file: f.originalName, error: '这个 Word 里没读到章节' }); continue; }
+      if (first) {
+        applyUploadedOutline(doc, chunks, f.originalName);
+        first = false;
+      } else {
+        // 同一份文件的第二部分：直接接在后面
+        chunks.forEach((c) => {
+          const t = String(c.title || '').trim();
+          if (!t) return;
+          doc.chapters.push({
+            id: uid('c_'), title: t, type: 'normal', hint: '', words: 0,
+            body: String(c.body || '').trim(), source: 'upload', level: Number(c.level) || 1,
+            number: String(c.number == null ? '' : c.number), noIdx: true, role: '', roleBy: '', updatedAt: nowIso()
+          });
+        });
+      }
+      report.push({ key, file: f.originalName, chapters: chunks.length });
+    }
+  }
+  // 没分到文件的那几份（只有默认模板）不要留在制作稿里，否则界面上会出现「空文件」
+  Object.keys(d.docs).forEach((k) => { if (!used[k]) delete d.docs[k]; });
+  saveDraft(p.id, d);
+  addEvent(db, p.id, 'draft', '补录：导入投标文件 ' + files.length + ' 份');
+  json(res, 200, { ok: true, mode: d.mode, docs: Object.keys(d.docs).map((k) => ({ key: k, title: d.docs[k].title, chapters: (d.docs[k].chapters || []).length - 2 })), report });
+});
+
+// 自动判一遍哪些章节是「重要技术 / 重要商务」，好让归档时挑对内容进知识库
+route('POST', '/api/projects/:id/backfill/review', async (req, res, ctx) => {
+  const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.id);
+  if (!p) return json(res, 404, { error: '项目不存在' });
+  const d = ensureDraft(p.id);
+  const out = [];
+  for (const key of Object.keys(d.docs || {})) {
+    const doc = d.docs[key];
+    if (!doc || !(doc.chapters || []).length) continue;
+    let r = null;
+    try { r = await reviewRoles(doc, { fallback: true }); } catch (e) { r = { changed: 0, map: {}, error: String(e && e.message || e) }; }
+    const chs = (doc.chapters || []).filter((c) => c && c.type === 'normal');
+    out.push({
+      key, title: doc.title, chapters: chs.length,
+      tech: chs.filter((c) => c.role === 'tech').length,
+      biz: chs.filter((c) => c.role === 'biz').length,
+      error: r && r.error ? r.error : ''
+    });
+  }
+  saveDraft(p.id, d);
+  json(res, 200, { ok: true, docs: out });
+});
+
 // 恢复自动生成的框架（上传整份替换后不满意可一键退回）
 route('POST', '/api/projects/:id/draft/:doc/restore-outline', async (req, res, ctx) => {
   const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.id);
@@ -771,7 +1238,7 @@ route('POST', '/api/projects/:id/draft/:doc/review-roles', async (req, res, ctx)
   const d = ensureDraft(p.id);
   const doc = d.docs[ctx.params.doc];
   if (!doc) return json(res, 404, { error: '这份文件还没有生成框架' });
-  const r = await reviewRoles(doc);
+  const r = await reviewRoles(doc, { fallback: true });
   saveDraft(p.id, d);
   const counts = { tech: 0, biz: 0, none: 0 };
   (doc.chapters || []).forEach((c) => { if (c.role === 'tech') counts.tech++; else if (c.role === 'biz') counts.biz++; else counts.none++; });
@@ -860,6 +1327,23 @@ route('GET', '/api/knowledge/:pid', async (req, res, ctx) => {
   json(res, 200, { ok: true, ...k });
 });
 
+// v1.1.4：知识库里的图片直接读原路径（只存引用，不复制文件）
+route('GET', '/api/knowledge-image/:pid/:name', async (req, res, ctx) => {
+  const pid = String(ctx.params.pid || '').replace(/[^\w-]/g, '');
+  const name = path.basename(String(ctx.params.name || ''));
+  const k = getKnowledge(pid);
+  if (!k) { res.writeHead(404); return res.end('not found'); }
+  let rel = '';
+  const all = [].concat(((k.chapters && k.chapters.tech) || {}).chapters || [], ((k.chapters && k.chapters.biz) || {}).chapters || []);
+  all.forEach((c) => { (c.charts || []).forEach((x) => { if (x.kind === 'image' && x.pngRel && path.basename(x.pngRel) === name) rel = x.pngRel; }); });
+  const sess = (k.indep && k.indep.sessions) || [];
+  sess.forEach((x) => { (x.charts || []).forEach((c) => { if (c.pngRel && path.basename(c.pngRel) === name) rel = c.pngRel; }); });
+  if (!rel) { res.writeHead(404); return res.end('not found'); }
+  const abs = path.resolve(DATA_DIR, rel);
+  if (!abs.startsWith(DATA_DIR) || !fs.existsSync(abs)) { res.writeHead(404); return res.end('not found'); }
+  res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-cache' });
+  fs.createReadStream(abs).pipe(res);
+});
 route('DELETE', '/api/knowledge/:pid', async (req, res, ctx) => {
   const ok = removeKnowledge(ctx.params.pid);
   json(res, 200, { ok: !!ok });
@@ -872,7 +1356,23 @@ route('POST', '/api/knowledge/:pid/rebuild', async (req, res, ctx) => {
   try {
     const r = rebuildKnowledgeFor(p);
     addEvent(db, p.id, 'archive', '重建知识库记录（技术 ' + r.chapters.tech + ' 章 / 商务 ' + r.chapters.biz + ' 章）');
-    json(res, 200, { ok: true, ...r });
+    // v1.2.0：重建知识库时把知识卡也重新提炼一遍（老项目升级用）
+    let cardTaskId = '';
+    try {
+      if (r.chapters) {
+        const chs = { tech: [], biz: [] };
+        // rebuildKnowledgeFor 只回数量，这里直接从知识库已存的章节文件里取正文
+        const k = getKnowledge(p.id);
+        ['tech', 'biz'].forEach((kind) => {
+          const src = (k && k.chapters && k.chapters[kind]) || null;
+          (src && src.chapters ? src.chapters : []).forEach((c) => {
+            chs[kind].push({ title: c.title, role: kind, body: c.body || '', charts: c.charts || [] });
+          });
+        });
+        if (chs.tech.length || chs.biz.length) cardTaskId = startCardTask(p, chs, {}).id;
+      }
+    } catch (e) { console.log('[TWB] 知识卡重提炼没启动：' + (e && e.message || e)); }
+    json(res, 200, { ok: true, ...r, cardTaskId });
   } catch (e) {
     json(res, 500, { error: '重建失败：' + String(e && e.message || e) });
   }
@@ -889,7 +1389,8 @@ route('GET', '/api/projects/:id/check', async (req, res, ctx) => {
     sources: listSources(p),
     hasAnalysis: !!an,
     analysisAt: an ? an.analysisAt : null,
-    apiReady: apiReady()
+    apiReady: apiReady(),
+    running: (function () { try { const t = listCheckTasks().find((x) => x.projectId === p.id); return t ? { taskId: t.id, message: t.message || '' } : null; } catch { return null; } })()
   });
 });
 
@@ -1059,8 +1560,18 @@ route('POST', '/api/projects/:id/close', async (req, res, ctx) => {
       title: mode === 'abandon' ? '放弃投标，关闭归档' : '关闭归档',
       detail: (body.note || '') + (mode === 'abandon' ? '\n放弃原因：' + body.abandonReason : '') + '\n归档目录：' + r.relDir + '\n文件数：' + r.files
     });
+    // v1.2.0：归档后自动把重要技术/商务内容提炼成知识卡（后台跑，不阻塞关闭）
+    let cardTaskId = '';
+    try {
+      const kc = r.knowledgeChapters;
+      if (kc && ((kc.tech || []).length || (kc.biz || []).length) && apiReady()) {
+        cardTaskId = startCardTask(p, kc, {}).id;
+        appendProcess(p.id, { kind: 'knowledge', title: '开始提炼知识卡', detail: '技术 ' + (kc.tech || []).length + ' 章 / 商务 ' + (kc.biz || []).length + ' 章' });
+      }
+    } catch (e) { console.log('[TWB] 知识卡提炼没启动：' + (e && e.message || e)); }
     json(res, 200, {
       ok: true, dir: r.dir, relDir: r.relDir, files: r.files,
+      cardTaskId,
       knowledge: r.knowledge || null,
       knowledgeSummary: r.knowledge && !r.knowledge.error
         ? { tech: (r.knowledge.counts && r.knowledge.counts.tech) || 0, biz: (r.knowledge.counts && r.knowledge.counts.biz) || 0, hasProfile: r.knowledge.hasProfile || {} }
@@ -1182,6 +1693,101 @@ route('POST', '/api/projects/:id/draft/:doc/chapter/:cid/indep/save', async (req
   s2.updatedAt = new Date().toISOString();
   saveSession(s2);
   json(res, 200, { ok: true, chars: (s2.text || '').length });
+});
+
+/* v1.1.3：PDF 真实版面预览（稿件 → Word → PDF → 每页 PNG + 每行纵向坐标） */
+route('POST', '/api/projects/:id/draft/:doc/chapter/:cid/indep/preview', async (req, res, ctx) => {
+  const p = needProject(ctx.params.id);
+  const { chapter } = indepChapter(p, ctx.params.doc, ctx.params.cid);
+  const body = await readJson(req).catch(() => ({}));
+  const s2 = ensureSession(p, ctx.params.doc, chapter);
+  if (typeof body.text === 'string') s2.text = body.text;
+  if (Array.isArray(body.charts)) {
+    const byId = new Map((s2.charts || []).map((c) => [c.id, c]));
+    s2.charts = body.charts.map((c) => {
+      const old = byId.get(c.id);
+      return old ? { ...old, title: c.title || old.title, caption: c.caption || old.caption, afterText: c.afterText || old.afterText } : null;
+    }).filter(Boolean);
+  }
+  saveSession(s2);
+  try {
+    const meta = await renderPreview(p, s2, !!body.force);
+    const base = '/api/indep-preview/' + encodeURIComponent(p.id) + '/' + encodeURIComponent(chapter.id) + '/';
+    json(res, 200, {
+      ok: true, sig: meta.sig, at: meta.at, total: meta.total,
+      pages: meta.pages.map((x) => ({ page: x.page, w: x.w, h: x.h, url: base + encodeURIComponent(x.img), lines: x.lines }))
+    });
+  } catch (e) {
+    json(res, 500, { error: '版面预览生成失败：' + String(e && e.message || e) });
+  }
+});
+
+/* v1.1.3：下载单张配图 / 单张表格。图片给 png，表格只给 docx */
+route('GET', '/api/projects/:id/draft/:doc/chapter/:cid/indep/chart/:chartId/download', async (req, res, ctx) => {
+  const p = needProject(ctx.params.id);
+  const { chapter } = indepChapter(p, ctx.params.doc, ctx.params.cid);
+  const s2 = ensureSession(p, ctx.params.doc, chapter);
+  const c = (s2.charts || []).find((x) => x.id === ctx.params.chartId);
+  if (!c) return json(res, 404, { error: '这张图不存在了' });
+  if (c.chartType === 'table') {
+    try {
+      const out = await chartDocx(s2, c.id);
+      res.writeHead(200, {
+        'Content-Type': MIME['.docx'] || 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'Content-Disposition': 'attachment; filename="' + encodeURIComponent(out.name) + '"'
+      });
+      return res.end(out.buf);
+    } catch (e) { return json(res, 500, { error: String(e && e.message || e) }); }
+  }
+  if (!c.png || !fs.existsSync(c.png)) return json(res, 404, { error: '这张图还没画出来' });
+  res.writeHead(200, {
+    'Content-Type': 'image/png',
+    'Content-Disposition': 'attachment; filename="' + encodeURIComponent(path.basename(c.png)) + '"'
+  });
+  fs.createReadStream(c.png).pipe(res);
+});
+
+route('GET', '/api/indep-preview/:pid/:cid/:name', async (req, res, ctx) => {
+  const f = previewPageFile(ctx.params.pid, ctx.params.cid, ctx.params.name);
+  if (!fs.existsSync(f)) { res.writeHead(404); return res.end('not found'); }
+  res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-cache' });
+  fs.createReadStream(f).pipe(res);
+});
+
+/* v1.1.3：独立编制里「重新上传 Word」——用你改过的 Word 覆盖稿件正文 */
+route('POST', '/api/projects/:id/draft/:doc/chapter/:cid/indep/import', async (req, res, ctx) => {
+  const p = needProject(ctx.params.id);
+  guardArchived(p);
+  const { chapter } = indepChapter(p, ctx.params.doc, ctx.params.cid);
+  const raw = await readBody(req);
+  const ctype = req.headers['content-type'] || '';
+  const bMatch = /boundary=(?:"([^"]+)"|([^;]+))/.exec(ctype);
+  if (!bMatch) return json(res, 400, { error: '请用表单方式上传文件' });
+  let parts;
+  try { parts = parseMultipart(raw, bMatch[1] || bMatch[2]); } catch (e) { return json(res, 400, { error: '文件读取失败' }); }
+  const part = parts.find((x) => x.filename);
+  if (!part) return json(res, 400, { error: '没有收到文件' });
+  const name = decodeFileName(part.filename);
+  const ext = path.extname(name).toLowerCase();
+  if (!['.docx', '.doc'].includes(ext)) return json(res, 400, { error: '只支持 Word 文件（.docx / .doc）' });
+  let buf = part.data;
+  if (ext === '.doc') {
+    const tmpIn = path.join(os.tmpdir(), 'twb_ii_' + Date.now() + '.doc');
+    const tmpOut = path.join(os.tmpdir(), 'twb_ii_' + Date.now() + '.docx');
+    fs.writeFileSync(tmpIn, buf);
+    try { buf = docToDocx(tmpIn, tmpOut); } finally { try { fs.unlinkSync(tmpIn); } catch {} try { fs.unlinkSync(tmpOut); } catch {} }
+  }
+  let text = '';
+  try { text = await extractDocxText(buf); } catch (e) { return json(res, 400, { error: '读不出这个 Word 的内容：' + String(e && e.message || e) }); }
+  text = String(text || '').replace(/\r\n/g, '\n').trim();
+  if (!text) return json(res, 400, { error: '这个 Word 里没有文字' });
+  const s2 = ensureSession(p, ctx.params.doc, chapter);
+  s2.text = text;
+  s2.updatedAt = new Date().toISOString();
+  s2.messages = (s2.messages || []).concat([{ role: 'ai', content: '已用你上传的《' + name + '》覆盖当前稿件（' + text.length + ' 字）。图表和补充材料提示保留，需要重画可以点「重新生成图表」。', at: new Date().toISOString() }]);
+  saveSession(s2);
+  appendProcess(p.id, { kind: 'indep', title: '独立编制重新上传 Word：' + chapter.title, detail: name + '，' + text.length + ' 字' });
+  json(res, 200, { ok: true, chars: text.length, fileName: name, session: clientSession(s2) });
 });
 
 route('POST', '/api/projects/:id/draft/:doc/chapter/:cid/indep/generate', async (req, res, ctx) => {
@@ -1339,6 +1945,195 @@ route('POST', '/api/maintenance/prune', async (req, res) => {
   } catch (e) { json(res, 500, { error: String(e && e.message || e) }); }
 });
 
+// ---------- v1.2.0：知识卡接口 ----------
+route('GET', '/api/card-types', async (req, res) => {
+  json(res, 200, { ok: true, types: CARD_TYPES });
+});
+
+route('GET', '/api/knowledge/:pid/cards', async (req, res, ctx) => {
+  const pid = ctx.params.pid;
+  const p = get(db, 'SELECT * FROM projects WHERE id = ?', pid);
+  const all = listCards(pid);
+  const out = {};
+  ['tech', 'biz'].forEach((k) => {
+    const f = all[k];
+    out[k] = {
+      projectId: pid,
+      projectName: (f && f.projectName) || (p && p.name) || '',
+      extractedAt: (f && f.extractedAt) || '',
+      extractError: (f && f.extractError) || '',
+      cards: (f && Array.isArray(f.cards)) ? f.cards : []
+    };
+  });
+  json(res, 200, { ok: true, types: CARD_TYPES, cards: out, projectName: (p && p.name) || '' });
+});
+
+// 重新提炼（老项目升级 / 不满意重跑）
+route('POST', '/api/knowledge/:pid/cards/extract', async (req, res, ctx) => {
+  const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.pid);
+  if (!p) return json(res, 404, { error: '项目不存在' });
+  const k = getKnowledge(p.id);
+  if (!k) return json(res, 404, { error: '这个项目还没有沉淀知识库内容' });
+  const chs = { tech: [], biz: [] };
+  ['tech', 'biz'].forEach((kind) => {
+    const src = (k.chapters && k.chapters[kind]) || null;
+    (src && src.chapters ? src.chapters : []).forEach((c) => {
+      chs[kind].push({ title: c.title, role: kind, body: c.body || '', charts: c.charts || [] });
+    });
+  });
+  if (!chs.tech.length && !chs.biz.length) return json(res, 400, { error: '这个项目没有可提炼的章节内容' });
+  if (!apiReady()) return json(res, 400, { error: '还没有填 DeepSeek API Key，没法提炼知识卡' });
+  const t = startCardTask(p, chs, {});
+  json(res, 200, { ok: true, taskId: t.id, task: getCardTask(t.id) });
+});
+
+route('GET', '/api/card-tasks/:id', async (req, res, ctx) => {
+  const t = getCardTask(ctx.params.id);
+  if (!t) return json(res, 404, { error: '任务不存在' });
+  json(res, 200, t);
+});
+
+route('POST', '/api/knowledge/:pid/cards/add', async (req, res, ctx) => {
+  const body = await readJson(req);
+  const kind = body.kind === 'biz' ? 'biz' : 'tech';
+  const c = addCard(ctx.params.pid, kind, body);
+  json(res, 200, { ok: true, card: c });
+});
+
+route('PUT', '/api/knowledge/:pid/cards/:kind/:cardId', async (req, res, ctx) => {
+  const body = await readJson(req);
+  const kind = ctx.params.kind === 'biz' ? 'biz' : 'tech';
+  const c = updateCard(ctx.params.pid, kind, ctx.params.cardId, body);
+  if (!c) return json(res, 404, { error: '知识卡不存在' });
+  json(res, 200, { ok: true, card: c });
+});
+
+route('DELETE', '/api/knowledge/:pid/cards/:kind/:cardId', async (req, res, ctx) => {
+  const kind = ctx.params.kind === 'biz' ? 'biz' : 'tech';
+  const ok = deleteCard(ctx.params.pid, kind, ctx.params.cardId);
+  json(res, 200, { ok });
+});
+
+// ---------- v1.1.5：全局任务中心 ----------
+// 页面切换、回首页、关掉标签再打开，都能从这里把还在跑的任务接回来。
+function projNameOf(pid) {
+  try { const p = get(db, 'SELECT name FROM projects WHERE id = ?', pid); return p ? p.name : ''; } catch { return ''; }
+}
+
+function activeTasksOf() {
+  const out = [];
+  try {
+    listActiveTasks().forEach((t) => out.push({
+      kind: 'analysis', kindLabel: '招标文件分析', id: t.taskId, projectId: t.projectId, projectName: projNameOf(t.projectId),
+      state: t.state, message: t.message || '', step: t.step || 0, total: t.total || 0, startedAt: t.startedAt || ''
+    }));
+  } catch {}
+  try {
+    listCheckTasks().forEach((t) => out.push({
+      kind: 'check', kindLabel: '投标文件核查', id: t.id, projectId: t.projectId, projectName: projNameOf(t.projectId),
+      state: t.state, message: t.message || '', step: t.progress || 0, total: t.total || 0, startedAt: t.startedAt || ''
+    }));
+  } catch {}
+  try {
+    listDraftTasks().forEach((t) => out.push({
+      kind: 'draft', kindLabel: '投标文件编制', id: t.id, projectId: t.projectId, projectName: projNameOf(t.projectId),
+      state: t.state, message: t.message || '', step: 0, total: 0, startedAt: t.startedAt || ''
+    }));
+  } catch {}
+  try {
+    listCardTasks().forEach((t) => out.push({
+      kind: 'cards', kindLabel: '知识卡提炼', id: t.id, projectId: t.projectId, projectName: t.projectName || projNameOf(t.projectId),
+      state: t.state, message: t.message || '', step: t.progress || 0, total: t.total || 0, startedAt: t.startedAt || ''
+    }));
+  } catch {}
+  backfillTasks.forEach((t) => {
+    if (!t || t.state !== 'running') return;
+    out.push({
+      kind: 'backfill', kindLabel: '项目补录', id: t.id, projectId: t.projectId, projectName: projNameOf(t.projectId),
+      state: t.state, message: t.message || '', step: t.step || 0, total: (t.steps || []).length || 6, startedAt: t.startedAt || ''
+    });
+  });
+  return out.sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)));
+}
+
+route('GET', '/api/tasks/active', async (req, res) => {
+  json(res, 200, { ok: true, tasks: activeTasksOf(), serverTime: nowIso() });
+});
+
+// ---------- v1.1.5：关掉网页就自动关掉后台服务 ----------
+// 每个页面开一个 clientId，每 15 秒报一次心跳；45 秒没心跳算这个页面关了。
+// 全部页面都关掉后等 60 秒（防刷新误判），期间有新页面打开就取消；还有任务在跑就等它跑完（最长 30 分钟）。
+const CLIENTS = new Map();       // clientId -> { at, ua }
+const CLIENT_TTL = 45 * 1000;
+const EXIT_GRACE = 60 * 1000;
+const EXIT_MAX_WAIT = 30 * 60 * 1000;
+let allGoneSince = 0;
+let exitTimer = null;
+let serverStartedAt = Date.now();
+
+function aliveClients() {
+  const now = Date.now();
+  let n = 0;
+  CLIENTS.forEach((c, k) => { if (now - c.at > CLIENT_TTL) CLIENTS.delete(k); else n++; });
+  return n;
+}
+
+function runningTaskCount() {
+  let n = 0;
+  try { n += listActiveTasks().length; } catch {}
+  try { n += listCheckTasks().length; } catch {}
+  try { n += listDraftTasks().length; } catch {}
+  try { n += listCardTasks().length; } catch {}
+  backfillTasks.forEach((t) => { if (t && t.state === 'running') n++; });
+  return n;
+}
+
+// 还没人连上过就不算「网页都关了」——刚启动、页面还没打开时不能自己退出
+let everConnected = false;
+
+function scheduleAutoExitCheck() {
+  if (exitTimer) return;
+  exitTimer = setInterval(() => {
+    if (!loadConfig().autoExitOnClose) { allGoneSince = 0; return; }
+    if (!everConnected) { allGoneSince = 0; return; }
+    const n = aliveClients();
+    if (n > 0) { allGoneSince = 0; return; }
+    if (!allGoneSince) { allGoneSince = Date.now(); return; }
+    const gone = Date.now() - allGoneSince;
+    if (gone < EXIT_GRACE) return;
+    const busy = runningTaskCount();
+    if (busy > 0) {
+      if (gone > EXIT_MAX_WAIT) { console.log('[TWB] 等任务超时，直接退出'); process.exit(0); }
+      return;
+    }
+    console.log('[TWB] 网页已全部关闭，任务也都跑完了，自动退出');
+    process.exit(0);
+  }, 5000);
+  if (exitTimer.unref) exitTimer.unref();
+}
+
+route('POST', '/api/heartbeat', async (req, res) => {
+  const body = await readJson(req);
+  const cid = String(body.clientId || '').slice(0, 80);
+  if (cid) {
+    CLIENTS.set(cid, { at: Date.now(), ua: String(req.headers['user-agent'] || '').slice(0, 120) });
+    everConnected = true;
+    allGoneSince = 0;
+  }
+  json(res, 200, { ok: true, clients: aliveClients(), autoExit: !!loadConfig().autoExitOnClose, running: runningTaskCount() });
+});
+
+route('POST', '/api/client-leave', async (req, res) => {
+  const body = await readJson(req);
+  const cid = String(body.clientId || '').slice(0, 80);
+  if (cid) CLIENTS.delete(cid);
+  json(res, 200, { ok: true, clients: aliveClients() });
+});
+
+route('GET', '/api/clients', async (req, res) => {
+  json(res, 200, { ok: true, clients: aliveClients(), running: runningTaskCount(), autoExit: !!loadConfig().autoExitOnClose, startedAt: new Date(serverStartedAt).toISOString() });
+});
+
 // ---------- 静态文件 ----------
 function serveStatic(req, res, urlPath) {
   if (urlPath === '/') urlPath = '/index.html';
@@ -1359,6 +2154,8 @@ function readOnlyBlock(method, pathname, pid) {
   const p = get(db, 'SELECT status FROM projects WHERE id = ?', pid);
   if (!p || p.status !== 'archived') return null;
   if (RO_ALLOW.some((rx) => rx.test(pathname))) return null;
+  // v1.1.3：归档项目也允许「删除项目」（只放 DELETE，改项目信息仍然拦住）
+  if (method === 'DELETE' && /^\/api\/projects\/[^/]+$/.test(pathname)) return null;
   return { error: '这个项目已经关闭归档了，只能查看。要修改请先点「重新打开」。', code: 'ARCHIVED_READONLY' };
 }
 
@@ -1394,4 +2191,7 @@ const server = http.createServer(async (req, res) => {
 const port = Number(process.env.TWB_PORT || cfg.port || 7830);
 server.listen(port, '127.0.0.1', () => {
   console.log('TWB_READY http://127.0.0.1:' + port);
+  serverStartedAt = Date.now();
+  // v1.1.5：关掉网页就自动关掉后台服务
+  try { scheduleAutoExitCheck(); } catch (e) { console.log('[TWB] 自动退出没启动：' + (e && e.message || e)); }
 });

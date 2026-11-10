@@ -8,6 +8,7 @@ import { loadDraft } from './draft.mjs';
 import { loadCheck } from './check.mjs';
 import { loadSubmit } from './submit.mjs';
 import { loadProfiles } from './profile.mjs';
+import { chartsOfChapter } from './knowledge.mjs';
 import { saveProjectKnowledge, keywordsOf } from './knowledge.mjs';
 import { copyProcessTo } from './process.mjs';
 
@@ -90,13 +91,38 @@ export function buildKnowledgePayload(project, db, opt = {}) {
       const chs = (doc.chapters || []).filter((c) => c && (c.role === 'tech' || c.role === 'biz'));
       chs.forEach((c) => {
         const body = String(c.body || '').trim();
-        if (!body) return;
+        const charts = chartsOfChapter(c);
+        // v1.1.4：只有表格没有正文的章节（索引表/偏离表）也要收，否则表格就丢了
+        if (!body && !charts.length) return;
         payload.chapters[c.role].push({
           title: c.title, role: c.role, number: c.number || '', level: c.level || 1,
+          type: c.type || 'normal',
           body: body.length > 20000 ? body.slice(0, 20000) : body,
+          charts,
           source: c.source || '', updatedAt: c.updatedAt || ''
         });
       });
+      // v1.1.4：索引表 / 偏离表 / 价格表这些「只有表格没有正文」的章节，在分册模式下不在主文件里，
+      // 单独从所有分册里捡回来，按表格存进知识库（否则表格经验全丢）。
+      const seenTitle = {};
+      chs.forEach((c) => { seenTitle[String(c.title || '')] = 1; });
+      Object.keys(draft.docs || {}).forEach((dk) => {
+        const dd = draft.docs[dk];
+        (dd.chapters || []).forEach((c) => {
+          if (!c || !(c.rows || []).length) return;
+          const tt = String(c.title || '');
+          if (seenTitle[tt]) return;
+          const charts = chartsOfChapter(c);
+          if (!charts.length) return;
+          seenTitle[tt] = 1;
+          const role = /技术/.test(tt) ? 'tech' : 'biz';
+          payload.chapters[role].push({
+            title: tt, role, number: c.number || '', level: c.level || 1,
+            type: c.type || 'normal', body: '', charts, source: c.source || '', updatedAt: c.updatedAt || ''
+          });
+        });
+      });
+
       // 生成历史：记下哪一章 AI 写过、写了几次、最终是否保留
       const log = Array.isArray(doc.genLog) ? doc.genLog : [];
       const byChapter = {};
@@ -116,7 +142,11 @@ export function buildKnowledgePayload(project, db, opt = {}) {
     chapterId: x.chapterId, chapterTitle: x.chapterTitle, role: x.role,
     title: x.title || '', text: String(x.text || '').slice(0, 30000),
     messages: (x.messages || []).map((m) => ({ role: m.role, content: String(m.content || '').slice(0, 2000), at: m.at })),
-    charts: (x.charts || []).map((c) => ({ title: c.title, caption: c.caption, reason: c.reason, chartType: c.chartType, spec: c.spec })),
+    charts: (x.charts || []).map((c) => ({
+      title: c.title, caption: c.caption, reason: c.reason, chartType: c.chartType,
+      spec: c.spec, pngRel: c.pngRel || '', width: c.width || 0, height: c.height || 0,
+      table: c.table || null
+    })),
     hints: x.hints || [],
     createdAt: x.createdAt, updatedAt: x.updatedAt
   }));
@@ -127,7 +157,18 @@ export function buildKnowledgePayload(project, db, opt = {}) {
 // 执行归档：复制五类产物到 归档/<年>/<编号_项目名>/
 export function archiveProject(project, db, opt = {}) {
   const year = String(project.createdAt || nowIso()).slice(0, 4);
-  const folder = safeName(`${project.code || project.autoCode || '未编号'}_${project.name || ''}`, project.id);
+  let folder = safeName(`${project.code || project.autoCode || '未编号'}_${project.name || ''}`, project.id);
+  // v1.2.0：同一个招标编号 + 项目名再归档一次（比如补录了同名老项目），
+  // 不能把两份文件混进同一个文件夹 —— 换个带项目号后缀的新文件夹。
+  const baseFolder = folder;
+  for (let n = 2; n <= 20; n++) {
+    const probe = path.join(ARCHIVE_DIR, year, folder, '项目摘要.json');
+    if (!fs.existsSync(probe)) break;
+    let oldId = '';
+    try { oldId = String((JSON.parse(fs.readFileSync(probe, 'utf8')).project || {}).id || ''); } catch {}
+    if (!oldId || oldId === project.id) break;
+    folder = baseFolder + '（' + n + '）';
+  }
   const dst = path.join(ARCHIVE_DIR, year, folder);
   fs.mkdirSync(dst, { recursive: true });
 
@@ -170,15 +211,27 @@ export function archiveProject(project, db, opt = {}) {
 
   // v1.1.0：把本次投标的重要技术/商务内容沉淀进本地专家知识库（失败不影响归档）
   let knowledge = null;
+  let payload = null;
   try {
-    const payload = buildKnowledgePayload(project, db, { sessions: opt.sessions || [] });
+    payload = buildKnowledgePayload(project, db, { sessions: opt.sessions || [] });
     knowledge = saveProjectKnowledge(project, payload);
     if (knowledge) files += 1;
   } catch (e) {
     knowledge = { error: String(e && e.message || e) };
   }
 
-  return { dir: dst, relDir: path.relative(ARCHIVE_DIR, dst), files, summary, knowledge };
+  // v1.2.0：知识卡提炼要用到的章节（调用方据此起一个后台提炼任务）
+  const knowledgeChapters = payload ? payload.chapters : null;
+  return { dir: dst, relDir: path.relative(ARCHIVE_DIR, dst), files, summary, knowledge, knowledgeChapters };
+}
+
+// v1.1.3：项目记录里存的归档相对路径（archiveNote 格式：备注||年份\编号_项目名）
+export function archiveRelDirOf(p) {
+  if (!p || !p.archiveNote) return '';
+  const s = String(p.archiveNote);
+  const i = s.indexOf('||');
+  const rel = i >= 0 ? s.slice(i + 2) : '';
+  return String(rel || '').trim();
 }
 
 export function listArchives() {
@@ -207,7 +260,19 @@ export function listArchives() {
       });
     }
   }
-  return out.sort((a, b) => String(b.archivedAt).localeCompare(String(a.archivedAt)));
+  // v1.1.3：按投标截止日期由近到远排（截止早的在上），没填截止日期的排最后
+  const t = (x) => {
+    const s = String(x || '').replace('T', ' ').replace(/\//g, '-').trim();
+    const d = new Date(s.replace(' ', 'T'));
+    return isNaN(d.getTime()) ? 0 : d.getTime();
+  };
+  return out.sort((a, b) => {
+    const ta = t(a.bidDeadline), tb = t(b.bidDeadline);
+    if (!ta && !tb) return String(a.name || '').localeCompare(String(b.name || ''));
+    if (!ta) return 1;
+    if (!tb) return -1;
+    return ta - tb;
+  });
 }
 
 // v1.1.1：知识库补录 —— 不重新归档，只把「这个项目现在的内容」重新沉淀进知识库。

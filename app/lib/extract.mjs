@@ -151,6 +151,34 @@ export async function getPageInfo(buf) {
   return out;
 }
 
+// v1.1.3：带坐标的 PDF 文字（用于把建议配图对齐到正文对应段落的右侧）
+export async function getPdfTextPos(buf) {
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const task = pdfjs.getDocument({ data: new Uint8Array(buf), useSystemFonts: true, isEvalSupported: false });
+  let doc = null;
+  try {
+    doc = await task.promise;
+    const pages = [];
+    for (let i = 1; i <= doc.numPages; i++) {
+      const page = await doc.getPage(i);
+      const vp = page.getViewport({ scale: 1 });
+      const tc = await page.getTextContent();
+      const items = [];
+      for (const it of tc.items) {
+        const str = String(it.str || '');
+        if (!str.trim()) continue;
+        const tr = it.transform || [1, 0, 0, 1, 0, 0];
+        items.push({ str, x: tr[4], y: tr[5] });
+      }
+      pages.push({ page: i, width: vp.width, height: vp.height, items });
+      try { page.cleanup(); } catch {}
+    }
+    return pages;
+  } finally {
+    await safeDestroy(task, doc);
+  }
+}
+
 // ---------- 压缩包 ----------
 export function extractArchive(archivePath, outDir) {
   fs.mkdirSync(outDir, { recursive: true });

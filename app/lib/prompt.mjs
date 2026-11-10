@@ -231,10 +231,15 @@ export const SYSTEM_ROLE_REVIEW = [
 export function roleReviewUserPrompt(chapters) {
   const L = ['【投标文件章节清单】'];
   (chapters || []).forEach((c) => {
-    L.push('- id=' + c.id + ' ｜ 标题：' + c.title + (c.hint ? (' ｜ 编写要点：' + String(c.hint).slice(0, 80)) : ''));
+    // v1.2.0：判性质不能只看标题 —— 把章节正文的摘录一起给 AI，
+    // 否则「实施」「方案」这类中性标题很容易判错，知识卡就漏了重要内容。
+    const body = String(c.body || '').replace(/\s+/g, ' ').trim();
+    const snip = body ? (' ｜ 正文摘录：' + body.slice(0, 260)) : '';
+    const hint = c.hint ? (' ｜ 编写要点：' + String(c.hint).slice(0, 80)) : '';
+    L.push('- id=' + c.id + ' ｜ 标题：' + c.title + hint + snip);
   });
   L.push('');
-  L.push('请逐章给出 role，输出 JSON。');
+  L.push('请结合标题和正文摘录逐章给出 role，输出 JSON。');
   return L.join('\n');
 }
 

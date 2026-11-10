@@ -73,6 +73,41 @@ async function chat(messages, opts) {
   }
 }
 
+// v1.2.0：把被截断的 JSON 尽量救回来 —— 从最后一个完整成员处截断，再补齐括号。
+// 读招标文件时一段 16 页的 JSON 经常超额度，能救回来就不用整段重跑。
+function repairJson(s) {
+  const stack = [];
+  let inStr = false, esc = false, lastSafe = -1;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '{' || c === '[') { stack.push(c === '{' ? '}' : ']'); continue; }
+    if (c === '}' || c === ']') { stack.pop(); if (stack.length) lastSafe = i; continue; }
+    if (c === ',' && stack.length) lastSafe = i;
+  }
+  if (!stack.length) return null;
+  if (lastSafe < 0) return null;
+  const head = s.slice(0, lastSafe);
+  // 重算 head 结尾处的栈
+  const st2 = [];
+  let inS = false, es = false;
+  for (let i = 0; i < head.length; i++) {
+    const c = head[i];
+    if (inS) { if (es) es = false; else if (c === '\\') es = true; else if (c === '"') inS = false; continue; }
+    if (c === '"') inS = true;
+    else if (c === '{') st2.push('}');
+    else if (c === '[') st2.push(']');
+    else if (c === '}' || c === ']') st2.pop();
+  }
+  return head + st2.reverse().join('');
+}
+
 function tryJson(text) {
   const t = String(text || '').trim();
   const fenced = /\u0060\u0060\u0060(?:json)?\s*([\s\S]*?)\u0060\u0060\u0060/.exec(t);
@@ -83,15 +118,31 @@ function tryJson(text) {
   if (s !== -1 && e > s) {
     try { return JSON.parse(cand.slice(s, e + 1)); } catch {}
   }
+  if (s !== -1) {
+    const fixed = repairJson(cand.slice(s));
+    if (fixed) { try { return JSON.parse(fixed); } catch {} }
+  }
   throw new Error('AI 返回的内容不是标准 JSON，请重试一次');
 }
 
 export async function callJson(system, user, opts) {
+  const base = { ...(opts || {}), json: true };
   const content = await chat(
     [{ role: 'system', content: system }, { role: 'user', content: user }],
-    { ...(opts || {}), json: true }
+    base
   );
-  return tryJson(content);
+  try {
+    return tryJson(content);
+  } catch (e) {
+    // v1.2.0：JSON 没闭合，十有八九是输出额度被截断了。放大额度再来一次，
+    // 比让上层整段重跑省一半时间（原来一段 16 页要重试 2 次才失败）。
+    const bigger = { ...base, maxTokens: Math.min((base.maxTokens || 8000) * 2, 32000), temperature: 0.1 };
+    const out2 = await chat(
+      [{ role: 'system', content: system }, { role: 'user', content: user }],
+      bigger
+    );
+    return tryJson(out2);
+  }
 }
 
 export async function callText(system, user, opts) {

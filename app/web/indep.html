@@ -26,7 +26,7 @@
     <section class="indep-left">
       <div class="indep-lh">
         <b>和 AI 说清楚要什么</b>
-        <span class="muted">例如：把第 3 部分写细一点 / 加一张进度甘特图 / 这段太空泛，补上具体人数和响应时间</span>
+        <span class="muted">改稿只走这里：说清楚要怎么改，点「执行更新」</span>
       </div>
       <div class="indep-msgs" id="ipMsgs"></div>
       <div class="indep-input">
@@ -43,17 +43,26 @@
         <b>当前稿件</b>
         <span class="muted" id="ipMeta"></span>
         <div class="row" style="gap:8px;margin-left:auto">
+          <div class="seg" id="ipViewSeg">
+            <button data-view="pdf" class="active">版面预览</button>
+            <button data-view="text">纯文本</button>
+          </div>
+          <button class="btn tiny" id="ipRefreshPv" title="按当前稿子重新排版面">刷新版面</button>
+          <button class="btn tiny" id="ipImport" title="用你自己改过的 Word 覆盖当前稿件">重新上传 Word</button>
+          <input type="file" id="ipImpInput" accept=".docx,.doc" style="display:none">
           <button class="btn tiny" id="ipGen">编制生成</button>
           <button class="btn tiny" id="ipRedoAll">重新生成图表</button>
         </div>
       </div>
-      <textarea class="indep-text" id="ipText" placeholder="还没有内容。点「编制生成」，AI 会按招标文件要求和专家画像写一版；也可以直接在这里写。"></textarea>
 
-      <div class="indep-sub">
-        <b>建议配图</b>
-        <span class="muted">下面这些图由 AI 判断该放什么、说明什么问题，工作台在本机画出来（示意图）</span>
+      <div class="indep-doc" id="ipDoc">
+        <div class="pv-grid" id="ipPv">
+          <div class="pv-pages" id="ipPages"></div>
+          <div class="pv-rail" id="ipRail"></div>
+        </div>
+        <textarea class="indep-text" id="ipText" style="display:none" placeholder="还没有内容。点「编制生成」，AI 会按招标文件要求和专家画像写一版；也可以直接在这里写。"></textarea>
+        <div class="pv-empty" id="ipPvEmpty" hidden></div>
       </div>
-      <div id="ipCharts" class="indep-charts"></div>
 
       <div class="indep-sub">
         <b>需要你补充的材料</b>
@@ -64,7 +73,7 @@
       <div class="indep-foot">
         <div class="field" style="flex:1">
           <label>导出位置（Word 存到这里）</label>
-          <input id="ipDir" placeholder="留空就用项目里的 03制作\\独立编制 文件夹">
+          <input id="ipDir" placeholder="留空就用项目里的 03制作\独立编制 文件夹">
         </div>
         <button class="btn" id="ipOpenDir">打开文件夹</button>
         <button class="btn primary" id="ipExport">导出验收 Word</button>

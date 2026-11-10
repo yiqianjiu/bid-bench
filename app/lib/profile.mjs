@@ -6,6 +6,26 @@ import { callJson } from './ai.mjs';
 import { nowIso } from './util.mjs';
 import { DATA_DIR } from './config.mjs';
 
+// v1.2.0：把相似项目记录变成给 AI 看的文字（原来是 refs.join → [object Object]）
+function refTextOf(refs) {
+  const L = ['【历史经验参考（本工作台做过的相似项目，只借鉴思路，不要搬名称/金额/指标）】'];
+  refs.slice(0, 3).forEach((r, i) => {
+    if (!r || typeof r !== 'object') return;
+    const bits = [];
+    if (r.name) bits.push(r.name);
+    if (r.purchaseMethod) bits.push(r.purchaseMethod);
+    if (r.year) bits.push(r.year + ' 年');
+    L.push('- 参考项目 ' + (i + 1) + '：' + (bits.join('，') || '（未命名）'));
+    if (r.direction && typeof r.direction === 'object') {
+      const d = r.direction;
+      if (d.techDirection) L.push('  技术方向：' + d.techDirection);
+      if (d.bizDirection) L.push('  商务方向：' + d.bizDirection);
+    }
+    if (Array.isArray(r.titles) && r.titles.length) L.push('  当时覆盖的章节：' + r.titles.slice(0, 8).join('、'));
+  });
+  return L.join('\n');
+}
+
 export const PROFILE_KINDS = ['tech', 'biz'];
 export const KIND_LABEL = { tech: '技术', biz: '商务' };
 
@@ -84,7 +104,8 @@ function techUserPrompt(project, analysis, refs) {
     L.push('');
   }
   if (refs && refs.length) {
-    L.push(refs.join('\n'));
+    // v1.2.0 修正：refs 是「相似项目记录」对象数组，以前直接 join 会输出 [object Object]
+    L.push(refTextOf(refs));
     L.push('');
   }
   L.push('请输出这份"技术专家上岗档案"的 JSON：');

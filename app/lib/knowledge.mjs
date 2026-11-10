@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from './config.mjs';
+import { buildCardReferenceBlock, listCards, removeCards, readCards, saveCards, ensureCardDirs, CARD_TYPES, TYPE_NAME } from './cards.mjs';
 import { nowIso } from './util.mjs';
 
 export const KB_DIR = path.join(DATA_DIR, '知识库');
@@ -15,6 +16,7 @@ const DIR_HISTORY = path.join(KB_DIR, '生成历史');
 export function ensureKb() {
   [KB_DIR, DIR_PROFILE.tech, DIR_PROFILE.biz, DIR_CHAPTER.tech, DIR_CHAPTER.biz, DIR_HISTORY, path.join(KB_DIR, '独立编制')]
     .forEach((d) => fs.mkdirSync(d, { recursive: true }));
+  try { ensureCardDirs(); } catch {}
 }
 
 function readJson(f, dft) {
@@ -84,6 +86,7 @@ export function saveProjectKnowledge(project, payload) {
     direction: {},
     keywords: payload.keywords || [],
     counts: { tech: 0, biz: 0 },
+    chartCounts: { table: 0, image: 0 },
     hasProfile: { tech: false, biz: false }
   };
 
@@ -105,6 +108,9 @@ export function saveProjectKnowledge(project, payload) {
         chapters: chs
       });
       rec.counts[kind] = chs.length;
+      const cc = countCharts(chs);
+      rec.chartCounts.table += cc.table;
+      rec.chartCounts.image += cc.image;
     }
   });
 
@@ -156,7 +162,18 @@ function readProfile(kind, pid) { return readJson(path.join(DIR_PROFILE[kind], p
 function readChapters(kind, pid) { return readJson(path.join(DIR_CHAPTER[kind], pid + '.json'), null); }
 
 // 生成给提示词用的一段「历史经验参考」
-export function buildReferenceBlock(project, kind, limit) {
+export function buildReferenceBlock(project, kind, limit, keywords) {
+  // v1.2.0：知识卡优先——直接给「可复用的做法」，画像只作为背景补充
+  let cardText = '';
+  let cardUsed = [];
+  try {
+    // v1.2.0 修正：knowledge.mjs 里没有 loadProfiles，改用本地 readProfile 组装，否则这里会抛错把知识卡整段吞掉
+    const profs = { tech: readProfile('tech', project.id), biz: readProfile('biz', project.id) };
+    const kw = keywords || keywordsOf(project, profs);
+    const r = buildCardReferenceBlock(project, kind, new Set(kw), { perType: 2 });
+    cardText = r.text;
+    cardUsed = r.used;
+  } catch (e) { cardText = ''; }
   const list = findSimilar(project, kind, limit || 3);
   if (!list.length) return { text: '', used: [] };
   const used = [];
@@ -184,8 +201,23 @@ export function buildReferenceBlock(project, kind, limit) {
     }
     if (lines.length > 1) { L.push(lines.join('\n')); used.push({ projectId: rec.projectId, name: rec.name }); }
   });
-  if (!used.length) return { text: '', used: [] };
-  return { text: L.join('\n'), used };
+  if (!used.length) return { text: cardText, used: cardUsed, cards: cardUsed };
+  const profileText = L.join('\n');
+  const text = cardText ? (cardText + '\n\n' + profileText) : profileText;
+  return { text, used: used.concat(cardUsed), cards: cardUsed };
+}
+
+/* ---------- v1.2.0：知识卡数量回写索引 ---------- */
+export function syncCardCount(pid, counts) {
+  try {
+    const idx = loadIndex();
+    const rec = (idx.projects || []).find((x) => x.projectId === pid);
+    if (!rec) return null;
+    rec.cardCounts = { tech: Number(counts && counts.tech) || 0, biz: Number(counts && counts.biz) || 0 };
+    rec.cardsAt = nowIso();
+    saveIndex(idx);
+    return rec.cardCounts;
+  } catch { return null; }
 }
 
 /* ---------- 管理界面 ---------- */
@@ -234,6 +266,53 @@ export function listKnowledge() {
   };
 }
 
+/* ---------- v1.1.4：图表引用（只存原路径，不复制文件，避免占本地存储） ---------- */
+// 表格类：索引表 / 偏离表 / 价格表 的行列是结构化数据，直接存进知识库 JSON。
+// 图片类：只记原路径 pngRel（相对数据目录）+ 标题/说明，知识库不复制 PNG。
+const TABLE_TYPES = { index: 1, deviation: 1, priceTable: 1, priceTable2: 1 };
+
+export function chartsOfChapter(c) {
+  const out = [];
+  if (!c) return out;
+  const title = String(c.title || '');
+  if (TABLE_TYPES[c.type] && Array.isArray(c.rows) && c.rows.length) {
+    out.push({
+      kind: 'table', chartType: c.type, title,
+      columns: Array.isArray(c.columns) ? c.columns : null,
+      rows: c.rows.slice(0, 300).map((r) => (r && typeof r === 'object' ? Object.assign({}, r) : r)),
+      rowCount: c.rows.length
+    });
+  }
+  const charts = Array.isArray(c.charts) ? c.charts : [];
+  charts.forEach((x) => {
+    if (!x) return;
+    if (x.table) {
+      out.push({ kind: 'table', chartType: x.chartType || 'table', title: x.title || '',
+        columns: (x.table.columns || null), rows: (x.table.rows || []).slice(0, 300), rowCount: (x.table.rows || []).length });
+      return;
+    }
+    if (x.chartType === 'table' && x.spec && Array.isArray(x.spec.rows)) {
+      out.push({ kind: 'table', chartType: 'table', title: x.title || '',
+        columns: x.spec.columns || null, rows: x.spec.rows.slice(0, 300), rowCount: x.spec.rows.length });
+      return;
+    }
+    if (x.pngRel || x.png) {
+      out.push({
+        kind: 'image', chartType: x.chartType || '', title: x.title || '', caption: x.caption || '',
+        reason: x.reason || '', pngRel: x.pngRel || '',
+        width: x.width || 0, height: x.height || 0
+      });
+    }
+  });
+  return out;
+}
+
+export function countCharts(chapters) {
+  let table = 0, image = 0;
+  (chapters || []).forEach((c) => { (c.charts || []).forEach((x) => { if (x.kind === 'table') table++; else if (x.kind === 'image') image++; }); });
+  return { table, image, total: table + image };
+}
+
 export function getKnowledge(pid) {
   const idx = loadIndex();
   const rec = (idx.projects || []).find((x) => x.projectId === pid) || null;
@@ -243,7 +322,8 @@ export function getKnowledge(pid) {
     profiles: { tech: readProfile('tech', pid), biz: readProfile('biz', pid) },
     chapters: { tech: readChapters('tech', pid), biz: readChapters('biz', pid) },
     history: readJson(path.join(DIR_HISTORY, pid + '.json'), null),
-    indep: readJson(path.join(KB_DIR, '独立编制', pid + '.json'), null)
+    indep: readJson(path.join(KB_DIR, '独立编制', pid + '.json'), null),
+    cards: listCards(pid)
   };
 }
 
@@ -259,5 +339,6 @@ export function removeKnowledge(pid) {
   });
   try { const h = path.join(DIR_HISTORY, pid + '.json'); if (fs.existsSync(h)) fs.unlinkSync(h); } catch {}
   try { const d = path.join(KB_DIR, '独立编制', pid + '.json'); if (fs.existsSync(d)) fs.unlinkSync(d); } catch {}
+  try { removeCards(pid); } catch {}
   return { removed: before - idx.projects.length };
 }
