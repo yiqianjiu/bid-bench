@@ -6,6 +6,19 @@ import { execFileSync } from 'node:child_process';
 const POWERSHELL = 'C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 const WINRAR = 'C:\\Program Files\\WinRAR\\WinRAR.exe';
 
+// v1.2.1：把 Word COM 的英文报错翻成用户看得懂的话
+function wordHint(e) {
+  const s = String((e && (e.stderr || e.message)) || e || '');
+  if (/800401F3|Invalid class string|ProgID|0x80080005/i.test(s)) {
+    return '这台电脑没有装 Microsoft Word（或 Word 打不开），读不了 .doc。请用 Word 打开这个文件，另存为 .docx 再上传。';
+  }
+  if (/找不到您的文件|cannot be found|isn't found|无法打开/i.test(s)) {
+    return 'Word 打不开这个 .doc 文件（可能已损坏，或路径里有特殊字符）。请用 Word 打开后另存为 .docx 再上传。';
+  }
+  const first = s.split(/\r?\n/).map((x) => x.trim()).filter(Boolean)[0] || '未知错误';
+  return '转换 .doc 失败：' + first.slice(0, 200);
+}
+
 export function hasWinRar() {
   try { return fs.existsSync(WINRAR); } catch { return false; }
 }
@@ -76,54 +89,15 @@ export async function extractDocxText(buf) {
   return res.value || '';
 }
 
-// ---------- DOC (legacy) via Word COM ----------
-export function docToDocx(docPath, outPath) {
-  const ps = [
-    '$ErrorActionPreference = "Stop"',
-    '$w = New-Object -ComObject Word.Application',
-    '$w.Visible = $false',
-    '$w.DisplayAlerts = 0',
-    '$d = $w.Documents.Open("' + docPath.replace(/"/g, '""') + '", $false, $true)',
-    '$d.SaveAs2("' + outPath.replace(/"/g, '""') + '", 16)',
-    '$d.Close(0)',
-    '$w.Quit()',
-    'Write-Output "OK"'
-  ].join('\r\n');
-  const psFile = path.join(os.tmpdir(), 'twb_conv_' + Date.now() + '.ps1');
-  fs.writeFileSync(psFile, ps, 'utf8');
-  try {
-    execFileSync(POWERSHELL, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psFile], { timeout: 180000 });
-  } finally {
-    try { fs.unlinkSync(psFile); } catch {}
-  }
-  return fs.readFileSync(outPath);
+// ---------- DOC (legacy) / DOCX -> PDF ----------
+// v1.2.3：真正的转换逻辑搬到 convert.mjs 了（子进程 + 异步，不再冻住服务）。
+// 这里保留同名导出，调用方加上 await 即可，其它不用改。
+export function docToDocx(docPath, outPath, opts) {
+  return import('./convert.mjs').then((m) => m.docToDocxAsync(docPath, outPath, opts));
 }
 
-// docx -> pdf（Word COM 无头导出，用于核查页码与空白页）
-export function docxToPdf(docxPath, pdfPath) {
-  const ps = [
-    '$ErrorActionPreference = "Stop"',
-    '$w = New-Object -ComObject Word.Application',
-    '$w.Visible = $false',
-    '$w.DisplayAlerts = 0',
-    '$d = $w.Documents.Open("' + docxPath.replace(/"/g, '""') + '", $false, $true)',
-    'try { $d.Fields.Update() } catch {}',
-    'try { foreach ($t in $d.TablesOfContents) { $t.Update() } } catch {}',
-    '$d.ExportAsFixedFormat("' + pdfPath.replace(/"/g, '""') + '", 17)',
-    '$d.Close(0)',
-    '$w.Quit()',
-    'Write-Output "OK"'
-  ].join('\r\n');
-  const psFile = path.join(os.tmpdir(), 'twb_topdf_' + Date.now() + '.ps1');
-  // PowerShell 5.1 必须带 BOM 才会按 UTF-8 读脚本，否则中文路径变乱码
-  fs.writeFileSync(psFile, '\ufeff' + ps, 'utf8');
-  try {
-    execFileSync(POWERSHELL, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psFile], { timeout: 240000 });
-  } finally {
-    try { fs.unlinkSync(psFile); } catch {}
-  }
-  if (!fs.existsSync(pdfPath)) throw new Error('Word 没能导出 PDF');
-  return fs.readFileSync(pdfPath);
+export function docxToPdf(docxPath, pdfPath, opts) {
+  return import('./convert.mjs').then((m) => m.docxToPdfAsync(docxPath, pdfPath, opts));
 }
 
 // 每页的图片数量（用于区分「真空白页」与「整页扫描/截图」）

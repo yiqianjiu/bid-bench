@@ -276,7 +276,7 @@ export async function aiRequirementCheck(project, analysis, pages, docName, onSt
     let data = null;
     for (let attempt = 0; attempt < 2 && !data; attempt++) {
       try {
-        data = await callJson(SYSTEM_REQ_CHECK, user, { maxTokens: 9000, temperature: 0.1, timeoutMs: 300000 });
+        data = await callJson(SYSTEM_REQ_CHECK, user, { maxTokens: 9000, temperature: 0.1, timeoutMs: 300000, purpose: 'check' });
       } catch (e) {
         if (attempt === 1) { failed++; return; }
       }
@@ -387,7 +387,7 @@ export async function aiDeepScore(project, analysis, pages, docName, onStep) {
     let data = null;
     for (let attempt = 0; attempt < 2 && !data; attempt++) {
       try {
-        data = await callJson(SYSTEM_SCORE_DEEP, user, { maxTokens: 9000, temperature: 0.2, timeoutMs: 300000 });
+        data = await callJson(SYSTEM_SCORE_DEEP, user, { maxTokens: 9000, temperature: 0.2, timeoutMs: 300000, purpose: 'score' });
       } catch (e) {
         if (attempt === 1) { failed++; data = null; }
       }

@@ -85,7 +85,7 @@ export async function reviewRoles(doc, opts) {
   const useFallback = !!(opts && opts.fallback);
   let raw;
   try {
-    raw = await callJson(SYSTEM_ROLE_REVIEW, roleReviewUserPrompt(list), { maxTokens: 4000, timeoutMs: 180000, temperature: 0.1, reasoningEffort: 'none' });
+    raw = await callJson(SYSTEM_ROLE_REVIEW, roleReviewUserPrompt(list), { maxTokens: 4000, timeoutMs: 180000, temperature: 0.1, reasoningEffort: 'none', purpose: 'draft' });
   } catch (e) {
     // v1.1.3：AI 复核失败时，如果调用方允许兜底，就用规则粗判（guessRole）先标一遍，
     // 至少让用户有东西可改，而不是一片空白；标完的 roleBy='rule'，下次 AI 复核仍会覆盖。
@@ -231,7 +231,10 @@ export function ensureDraft(pid, mode) {
     if (mode && mode !== d.mode) { d.mode = mode; saveDraft(pid, d); }
     return d;
   }
-  d = { projectId: pid, mode: mode || 'split', docs: {}, createdAt: nowIso() };
+  // v1.2.2：默认按「合并成一份」建稿。实际用下来，大家手上的标书基本都是合并版，
+  // 以前默认拆三份，用户把合并文件传进「价格文件」那一格，就被当成了价格文件。
+  // 需要分三份的，点顶上的「改成三份」再传，切换逻辑不受影响。
+  d = { projectId: pid, mode: mode || 'merged', docs: {}, createdAt: nowIso() };
   const keys = d.mode === 'merged' ? ['merged'] : DOC_ORDER;
   keys.forEach((k) => { d.docs[k] = makeDoc(k); });
   return saveDraft(pid, d);
@@ -564,7 +567,7 @@ export async function buildOutlineAI(project, draft, docKey, analysis) {
     '',
     '请为「' + doc.title + '」设计章节框架。'
   ].join('\n');
-  const res = await callJson(sys, user, { maxTokens: 4000, timeoutMs: 180000, reasoningEffort: 'none' });
+  const res = await callJson(sys, user, { maxTokens: 4000, timeoutMs: 180000, reasoningEffort: 'none', purpose: 'draft' });
   const arr = (res && res.chapters) || [];
   const chapters = [];
   arr.forEach((c) => {
@@ -674,12 +677,12 @@ export async function generateChapter(project, draft, docKey, chapterId, analysi
   }
   const sysPrompt = draftSystemPrompt(role);
   const maxTokens = Math.min(6000 + words * 4, 32000);
-  let text = await callText(sysPrompt, draftUserPrompt(ctx), { maxTokens, timeoutMs: 300000, temperature: 0.5, reasoningEffort: 'none' });
+  let text = await callText(sysPrompt, draftUserPrompt(ctx), { maxTokens, timeoutMs: 300000, temperature: 0.5, reasoningEffort: 'none', purpose: 'draft' });
   let body = String(text || '').trim();
   // 重要技术/商务章节写得过短时，再要一次（模型偶尔会提前收尾）
   if (role && body.length > 40 && body.length < words * 0.55) {
     const retryCtx = { ...ctx, mode: 'expand', current: body };
-    const t2 = await callText(sysPrompt, draftUserPrompt(retryCtx), { maxTokens, timeoutMs: 300000, temperature: 0.5, reasoningEffort: 'none' });
+    const t2 = await callText(sysPrompt, draftUserPrompt(retryCtx), { maxTokens, timeoutMs: 300000, temperature: 0.5, reasoningEffort: 'none', purpose: 'draft' });
     const b2 = String(t2 || '').trim();
     if (b2.length > body.length) body = b2;
   }

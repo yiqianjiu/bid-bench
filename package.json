@@ -1,6 +1,6 @@
 {
   "name": "bid-bench",
-  "version": "1.2.0",
+  "version": "1.2.4",
   "private": false,
   "type": "module",
   "description": "投标业务工作台 —— 面向投标专员的全流程本地工作台：招标文件解析、逐条响应核查、模拟评标、标书框架生成、递交清单与归档",
@@ -11,7 +11,9 @@
     "bid",
     "tender",
     "工作台",
-    "DeepSeek"
+    "DeepSeek",
+    "OpenAI-compatible",
+    "Ollama"
   ],
   "license": "MIT",
   "engines": {

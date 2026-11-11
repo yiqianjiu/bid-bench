@@ -266,6 +266,40 @@ function paraInfo(pXml, styles) {
   return { styleId, styleName, level, numId, ilvl, text: text.replace(/\u00a0/g, ' ').trim(), toc: isTocStyle(styleId, styleName) };
 }
 
+// v1.2.2：很多标书的章节编号是手打进标题里的（「9.1 需求理解」），numbering.xml 里没有自动编号。
+// 以前只认自动编号，认不到就退回数组下标，于是显示成「九.1」这种混搭。这里先认标题文字开头的写死编号，
+// 原样保留，并从标题里剥掉（避免显示成「9.1 9.1 需求理解」）。最多剥两段（「A. 4.2.1 功能需求分析」→「A. 4.2.1」）。
+const LITERAL_NUM_RX = [
+  /^(第[0-9一二三四五六七八九十百零〇]{1,4}[章节篇部])(?:[\s、.．:：]|$)/, // 第三章 / 第9节 / 第4部分
+  /^([0-9]{1,3}(?:[.．][0-9]{1,3}){1,4})[.、]?(?=[\s\u3000]|$)/,          // 9.1 / 4.2.1
+  /^([0-9]{1,3})[、.．)）](?:[\s\u3000]*)/,                             // 1、 / 2. / 3)
+  /^([0-9])[\s\u3000]+(?![\u4e00-\u9fa5]*(?:个月|月|日|天|年|次|人|项|条|份|页|元|万|亿|倍|台|套|个|小时|分钟|秒|米|吨|克|公斤|千瓦|伏|安|赫|兆|%))/,  // 1 总则（「12 个月内」「2 次谐波」这种是正文，不是编号）
+  /^([（(][0-9一二三四五六七八九十]{1,3}[）)])(?:[\s\u3000]*)/,             // （三） / (2)
+  /^([一二三四五六七八九十]{1,3})[、.．](?:[\s\u3000]*)/,                   // 三、
+  /^([一二三四五六七八九十]{1,3})[\s\u3000]+(?![个次项条份页元万倍台套月日天年人])/,  // 一 投标函
+  /^([A-Za-z]{1,2}[.、．])(?:[\s\u3000]*)/,                               // A. / A、
+];
+
+function splitLiteralNumber(raw) {
+  let text = String(raw || '').trim();
+  const parts = [];
+  for (let pass = 0; pass < 2; pass++) {
+    let hit = null;
+    for (const rx of LITERAL_NUM_RX) {
+      const m = rx.exec(text);
+      if (m && m[1]) { hit = m; break; }
+    }
+    if (!hit) break;
+    const rest = text.slice(hit[0].length).trim();
+    // 剥完就空了（标题本身就是编号），或者剩下的是纯符号，就不再剥
+    if (!rest || !/[\u4e00-\u9fa5A-Za-z0-9]/.test(rest)) break;
+    // 保留原来的分隔符（「一、」的顿号、「（三）」的括号），这样显示出来和 Word 里一模一样
+    parts.push(hit[0].trim());
+    text = rest;
+  }
+  return parts.length ? { number: parts.join(' '), text } : null;
+}
+
 // 从 document.xml 抽出「标题 + 正文」结构
 // opts.maxLevel：只保留到第几级标题（默认 2，即只列一级与二级标题）
 export function parseDocxOutline(buf, opts) {
@@ -290,8 +324,16 @@ export function parseDocxOutline(buf, opts) {
     // 编号必须在整篇顺序里推进（3/4 级不输出也要占号），但空段落不占号：
     // 实测该文档每个「部分」末尾都有一个空的 1 级标题段落（带 sectPr 分节符），
     // 若让它占号，后面所有序号都会比 Word 目录大 1。
-    if (info.numId && info.text) info.number = numberAt(info.numId, info.ilvl);
-    else info.number = '';
+    // 自动编号先算（即使不用它，也要让它按顺序推进，否则后面序号会错位）
+    const autoNo = (info.numId && info.text) ? numberAt(info.numId, info.ilvl) : '';
+    // 标题文字里写死的编号优先，原样保留
+    const lit = info.text ? splitLiteralNumber(info.text) : null;
+    if (lit) {
+      info.number = lit.number;
+      info.text = lit.text;
+    } else {
+      info.number = autoNo;
+    }
     paras.push(info);
   }
   const chapters = [];

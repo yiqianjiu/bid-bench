@@ -76,7 +76,7 @@ export async function ensureText(fileRow, absPath) {
     kind = 'doc';
     const tmpOut = path.join(TEXT_DIR, fileRow.id + '.converted.docx');
     try {
-      docToDocx(absPath, tmpOut);
+      await docToDocx(absPath, tmpOut);
       const text = await extractDocxText(fs.readFileSync(tmpOut));
       pages = [{ page: 1, text }];
     } catch (e) {
@@ -142,7 +142,8 @@ export async function ocrPages(fileRow, absPath, pageNumbers) {
           '这是招标文件第 ' + pageNo + ' 页的图片。请把这一页上的全部文字逐行转写出来，保持原有顺序与层级；表格请按「行1列1 | 行1列2」的格式逐行输出；如果页面是空白页，返回 {"text":"","blank":true}。',
           [img]
         );
-        const vt = String(r.text || '').trim();
+        // v1.2.3：没有配「能看图」的模型时 callVisionJson 返回 null，直接用本机 OCR 的结果
+        const vt = r ? String(r.text || '').trim() : '';
         if (vt.length > text.length) { text = vt; engine = 'vision'; }
       } catch (e) {
         if (!text) results.push({ page: pageNo, error: String(e && e.message || e) });
@@ -317,7 +318,7 @@ export async function outlineOfBidFile(fileRow, absPath) {
       const tmpIn = path.join(TEXT_DIR, fileRow.id + '.in.doc');
       const tmpOut = path.join(TEXT_DIR, fileRow.id + '.out.docx');
       fs.writeFileSync(tmpIn, buf);
-      try { docToDocx(tmpIn, tmpOut); text = await extractDocxText(fs.readFileSync(tmpOut)); }
+      try { await docToDocx(tmpIn, tmpOut); text = await extractDocxText(fs.readFileSync(tmpOut)); }
       finally { try { fs.unlinkSync(tmpIn); } catch {} try { fs.unlinkSync(tmpOut); } catch {} }
     } else {
       text = await extractDocxText(buf);

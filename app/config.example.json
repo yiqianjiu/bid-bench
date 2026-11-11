@@ -1,9 +1,27 @@
 {
   "port": 7830,
+  "company": "",
+  "version": "1.2.4",
+  "autoExitOnClose": true,
+  "convertTimeoutSec": 480,
+  "providers": [
+    {
+      "id": "p_deepseek",
+      "name": "DeepSeek",
+      "kind": "deepseek",
+      "baseUrl": "https://api.deepseek.com",
+      "model": "deepseek-chat",
+      "apiKey": "",
+      "vision": false,
+      "json": true,
+      "local": false,
+      "timeoutSec": 300,
+      "enabled": true
+    }
+  ],
+  "purposes": {},
+  "defaultProvider": "p_deepseek",
   "deepseekApiKey": "",
   "deepseekBaseUrl": "https://api.deepseek.com",
-  "deepseekModel": "deepseek-flash",
-  "company": "",
-  "version": "1.2.0",
-  "autoExitOnClose": true
+  "deepseekModel": "deepseek-chat"
 }

@@ -268,7 +268,7 @@ async function runAnalysis(db, p, task, opts) {
           strong: fatalCand.strong.filter((s) => s.page >= a && s.page <= b),
           weak: fatalCand.weak.filter((s) => s.page >= a && s.page <= b).slice(0, 40)
         };
-        out = await callJson(SYSTEM_ANALYSIS, analysisUserPrompt(text, segCand), { maxTokens: 12000, timeoutMs: 300000 });
+        out = await callJson(SYSTEM_ANALYSIS, analysisUserPrompt(text, segCand), { maxTokens: 12000, timeoutMs: 300000, purpose: 'analyze' });
         lastErr = null;
         break;
       } catch (e) {
@@ -356,7 +356,7 @@ async function runAnalysis(db, p, task, opts) {
         .join('\n\n');
     }
     if (scoreText.length > 60000) scoreText = scoreText.slice(0, 60000);
-    const sc = await callJson(SYSTEM_SCORE, scoreUserPrompt(scoreText), { maxTokens: 10000, timeoutMs: 300000 });
+    const sc = await callJson(SYSTEM_SCORE, scoreUserPrompt(scoreText), { maxTokens: 10000, timeoutMs: 300000, purpose: 'analyze' });
     const target = byKey.get('score');
     if (target && Array.isArray(sc && sc.items)) {
       for (const raw of sc.items) {

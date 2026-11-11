@@ -200,7 +200,7 @@ export async function generateProfile(project, analysis, kind, refs) {
   if (!analysis) throw new Error('还没有招标分析结果，请先完成招标文件分析');
   const sys = k === 'tech' ? SYS_TECH : SYS_BIZ;
   const user = k === 'tech' ? techUserPrompt(project, analysis, refs) : bizUserPrompt(project, analysis, refs);
-  const raw = await callJson(sys, user, { maxTokens: 6000, timeoutMs: 240000, temperature: 0.3, reasoningEffort: 'none' });
+  const raw = await callJson(sys, user, { maxTokens: 6000, timeoutMs: 240000, temperature: 0.3, reasoningEffort: 'none', purpose: 'profile' });
   const data = normalize(k, raw);
   if (!data.summary && !data.direction) throw new Error('AI 没有返回有效的画像内容，请重试');
   return data;

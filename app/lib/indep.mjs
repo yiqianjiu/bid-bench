@@ -210,7 +210,7 @@ function parseGen(out) {
 export async function generateDraft(project, session, analysis, extra) {
   if (!apiReady()) throw new Error('还没有填写 DeepSeek API Key，请到「设置」里填。');
   const ctx = buildContext(project, session, analysis, extra);
-  const out = await callJson(SYS_GEN, genUserPrompt(project, session, ctx, extra), { maxTokens: 32000, timeoutMs: 420000, temperature: 0.55 });
+  const out = await callJson(SYS_GEN, genUserPrompt(project, session, ctx, extra), { maxTokens: 32000, timeoutMs: 420000, temperature: 0.55, purpose: 'draft' });
   const g = parseGen(out);
   if (!g.text || g.text.length < 80) throw new Error('AI 没有返回有效正文，请重试一次');
   session.text = g.text;
@@ -298,7 +298,7 @@ export async function reworkChart(project, session, chartId, instruction) {
     '【用户的修改要求】' + (instruction || '（没说，就换个更好的画法）'),
     ctx.profileText ? '【专家画像】' + ctx.profileText.slice(0, 2000) : ''
   ].filter(Boolean).join('\n\n');
-  const out = await callJson(SYS_CHART, user, { maxTokens: 4000, timeoutMs: 180000, temperature: 0.4, reasoningEffort: 'none' });
+  const out = await callJson(SYS_CHART, user, { maxTokens: 4000, timeoutMs: 180000, temperature: 0.4, reasoningEffort: 'none', purpose: 'draft' });
   const j = out && typeof out === 'object' ? out : {};
   const chartType = String(j.chartType || old.chartType || '').toLowerCase();
   const patch = { chartType, spec: j.spec || {}, title: j.title || old.title, caption: j.caption || old.caption };
@@ -344,7 +344,7 @@ export async function chatWithAI(project, session, analysis, message) {
   const hist = session.messages.slice(-16);
   for (const m of hist) msgs.push({ role: m.role === 'ai' ? 'assistant' : 'user', content: String(m.content || '').slice(0, 4000) });
   msgs.push({ role: 'user', content: message });
-  const reply = await chatMessages(msgs, { maxTokens: 6000, timeoutMs: 180000, temperature: 0.6, reasoningEffort: 'none' });
+  const reply = await chatMessages(msgs, { maxTokens: 6000, timeoutMs: 180000, temperature: 0.6, reasoningEffort: 'none', purpose: 'draft' });
   session.messages.push({ role: 'user', content: message, at: nowIso() });
   session.messages.push({ role: 'ai', content: reply, at: nowIso() });
   if (session.messages.length > 200) session.messages = session.messages.slice(-200);
@@ -365,7 +365,7 @@ export async function applyUpdate(project, session, analysis) {
     '【当前稿件（在它的基础上改，不要推倒重写没提到的部分）】',
     String(session.text || '').slice(0, 20000)
   ].join('\n');
-  const out = await callJson(SYS_GEN, genUserPrompt(project, session, ctx, extra), { maxTokens: 32000, timeoutMs: 420000, temperature: 0.5 });
+  const out = await callJson(SYS_GEN, genUserPrompt(project, session, ctx, extra), { maxTokens: 32000, timeoutMs: 420000, temperature: 0.5, purpose: 'draft' });
   const g = parseGen(out);
   if (!g.text || g.text.length < 80) throw new Error('AI 没有返回有效正文，请重试一次');
   session.text = g.text;
@@ -595,8 +595,9 @@ export async function exportDraftWord(project, session, outDir) {
 // 稿件 Word → PDF → 逐页 PNG。按 text+charts 的签名缓存，稿子没改就直接用上次渲染的图。
 function previewDir(pid, cid) { return path.join(INDEP_DIR, pid, safeName(cid), '预览'); }
 
-function previewSig(session) {
-  const raw = String(session.text || '') + '||' + (session.charts || []).map((c) => [c.id, c.afterText || '', c.caption || '', c.at || ''].join('~')).join('|') + '||' + (session.hints || []).map((h) => h.text || '').join('|');
+// v1.2.4：签名把「高清」也算进去，否则切了高清还是拿回旧分辨率的图
+function previewSig(session, hd) {
+  const raw = String(session.text || '') + '||' + (session.charts || []).map((c) => [c.id, c.afterText || '', c.caption || '', c.at || ''].join('~')).join('|') + '||' + (session.hints || []).map((h) => h.text || '').join('|') + '||' + (hd ? 'hd2.0' : 'std1.6');
   return crypto.createHash('sha1').update(raw).digest('hex').slice(0, 16);
 }
 
@@ -611,9 +612,11 @@ export function loadPreview(pid, cid) {
   } catch { return null; }
 }
 
-export async function renderPreview(project, session, force) {
+// v1.2.4：多一个 opts —— { hd: true } 时按 2.0 倍出图（约 1190px 宽），否则 1.6 倍（约 952px）
+export async function renderPreview(project, session, force, opts) {
+  const hd = !!(opts && opts.hd);
   const pid = session.projectId, cid = session.chapterId;
-  const sig = previewSig(session);
+  const sig = previewSig(session, hd);
   const old = loadPreview(pid, cid);
   if (!force && old && old.sig === sig) return old;
 
@@ -627,13 +630,13 @@ export async function renderPreview(project, session, force) {
   const docxFile = path.join(dir, 'preview.docx');
   fs.writeFileSync(docxFile, docxBuf);
   const pdfFile = path.join(dir, 'preview.pdf');
-  docxToPdf(docxFile, pdfFile);
+  await docxToPdf(docxFile, pdfFile);
   const pdfBuf = fs.readFileSync(pdfFile);
   const pos = await getPdfTextPos(pdfBuf);
   const total = pos.length || 1;
   const want = [];
   for (let i = 1; i <= Math.min(total, 200); i++) want.push(i);
-  const imgs = await renderPdfPages(pdfBuf, want, 1.6);
+  const imgs = await renderPdfPages(pdfBuf, want, hd ? 2.0 : 1.6);
 
   const pages = [];
   for (const p of pos) {
@@ -654,7 +657,7 @@ export async function renderPreview(project, session, force) {
       lines: lines.map((l) => ({ y: Math.round((p.height - l.y) * 10) / 10, text: l.text.slice(0, 80) })).slice(0, 400)
     });
   }
-  const meta = { sig, at: nowIso(), total: pages.length, pages };
+  const meta = { sig, hd, at: nowIso(), total: pages.length, pages };
   fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta), 'utf8');
   return meta;
 }

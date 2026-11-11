@@ -169,7 +169,7 @@ export function startCardTask(project, chaptersByRole, opt = {}) {
             '请输出 JSON：{"cards":[...]}'
           ].join('\n');
           try {
-            const r = await callJson(SYS_CARD, user, { maxTokens: 8000, timeoutMs: 240000, temperature: 0.3, reasoningEffort: 'none' });
+            const r = await callJson(SYS_CARD, user, { maxTokens: 8000, timeoutMs: 240000, temperature: 0.3, reasoningEffort: 'none', purpose: 'card' });
             all.push(...normalizeCards(r, kind, project));
           } catch (e) {
             t.error = String(e && e.message || e);

@@ -48,7 +48,13 @@ async function api(method, url, body) {
   const text = await r.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = { error: text }; }
-  if (!r.ok) throw new Error((data && data.error) || ('请求失败 ' + r.status));
+  if (!r.ok) {
+    // v1.2.1：把错误码带出来，前端才能做「已存在同名同编号项目 → 直接打开它」这种处理
+    const err = new Error((data && data.error) || ('请求失败 ' + r.status));
+    err.status = r.status;
+    err.data = data;
+    throw err;
+  }
   return data;
 }
 
@@ -813,28 +819,47 @@ function editItemDialog(itemId) {
   };
 }
 
+// v1.2.1：PDF 和 Word（.doc/.docx）都能按页看原文。Word 由后台先用本机 Word 导成 PDF 再渲染，
+// 第一次点会等几秒（大的标书要十几秒），之后有缓存就很快。
 function showPage(n) {
   const tender = S.cur.files.filter((f) => f.stage === 'tender');
   const f = tender.find((x) => /pdf$/i.test(x.originalName)) || tender[0];
   if (!f) { toast('找不到招标文件', true); return; }
-  const isPdf = /pdf$/i.test(f.originalName);
   const html = '<h3>招标文件 第 ' + n + ' 页</h3>' +
     '<p class="muted" style="margin-top:0;font-size:13px">' + esc(f.originalName) + '</p>' +
-    (isPdf
-      ? '<div class="pageview"><img id="pvImg" src="/api/files/' + f.id + '/page/' + n + '" alt="第 ' + n + ' 页"></div>'
-      : '<div class="placeholder">Word 文件不能按页显示图片。可以在「招标文件」页签点「看内容」看全文。</div>') +
+    '<div class="pageview" id="pvWrap"><div class="pv-empty" id="pvLoading">正在准备这一页…（Word 文件第一次打开要先转成 PDF，稍等几秒）</div>' +
+      '<img id="pvImg" style="display:none" alt="第 ' + n + ' 页"></div>' +
     '<div class="modal-foot">' +
-      (isPdf ? '<button class="btn" id="pvPrev">上一页</button><button class="btn" id="pvNext">下一页</button>' : '') +
+      '<button class="btn" id="pvPrev">上一页</button><button class="btn" id="pvNext">下一页</button>' +
+      '<span class="muted" id="pvInfo" style="font-size:12.5px"></span>' +
       '<button class="btn" data-close>关闭</button></div>';
   openModal(html);
   let cur = n;
+  let total = 0;
+  const img = $('#pvImg');
+  const load = () => {
+    const wrap = $('#pvLoading');
+    if (wrap) { wrap.textContent = '正在准备这一页…'; wrap.style.display = ''; }
+    img.style.display = 'none';
+    img.onload = () => { img.style.display = ''; if (wrap) wrap.style.display = 'none'; };
+    img.onerror = () => {
+      if (wrap) { wrap.style.display = ''; wrap.textContent = '这一页打不开（Word 转换失败或文件已损坏）。可以到「招标文件」页签点「看内容」看全文。'; }
+    };
+    img.src = '/api/files/' + f.id + '/page/' + cur + '?t=' + Date.now();
+    const h = $('#modal h3');
+    if (h) h.textContent = '招标文件 第 ' + cur + ' 页';
+    const info = $('#pvInfo');
+    if (info) info.textContent = total ? '共 ' + total + ' 页' : '';
+  };
+  load();
+  fetch('/api/files/' + f.id + '/pages').then((r) => r.json()).then((d) => {
+    if (d && d.ok) { total = d.pageCount || 0; const info = $('#pvInfo'); if (info) info.textContent = total ? '共 ' + total + ' 页' : ''; }
+  }).catch(() => {});
   const go = (d) => {
     cur += d;
     if (cur < 1) cur = 1;
-    const img = $('#pvImg');
-    if (img) img.src = '/api/files/' + f.id + '/page/' + cur;
-    const h = $('#modal h3');
-    if (h) h.textContent = '招标文件 第 ' + cur + ' 页';
+    if (total && cur > total) cur = total;
+    load();
   };
   if ($('#pvPrev')) $('#pvPrev').onclick = () => go(-1);
   if ($('#pvNext')) $('#pvNext').onclick = () => go(1);
@@ -1252,7 +1277,17 @@ function newProjectDialog() {
       S.tab = 'tender';
       renderProject();
       toast('项目已创建，把招标文件传上来吧');
-    } catch (e) { toast(e.message, true); }
+    } catch (e) {
+      // v1.2.1：同名 + 同编号的项目已经存在，别重复建，直接带用户去那个项目
+      if (e.data && e.data.code === 'DUPLICATE_PROJECT' && e.data.dupId) {
+        closeModal(true);
+        await refreshProjects();
+        await openProject(e.data.dupId);
+        toast('这个项目已经存在，已经帮你打开了（没有重复创建）', true);
+        return;
+      }
+      toast(e.message, true);
+    }
   };
 }
 
@@ -1425,7 +1460,7 @@ async function bfRun() {
     $('#bfBid').classList.remove('disabled');
     return;
   }
-  const steps = 6;
+  const steps = 7;   // v1.2.1：多了「生成专家画像」一步
   const tick = async () => {
     if (!BF || BF.taskId !== taskId) return;
     let t = null;
@@ -1503,7 +1538,7 @@ function backfillDialogAgain() {
   const g = $('#bfGo');
   if (g) g.onclick = () => bfRun();
   const t0 = { step: 0 };
-  const steps = 6;
+  const steps = 7;   // v1.2.1：多了「生成专家画像」一步
   const tick = async () => {
     if (!BF || BF !== st) return;
     let t = null;
@@ -1549,48 +1584,184 @@ function showBackfillDone(res) {
       '<div class="bf-done-row"><b>归档位置</b>' + esc(res.relDir || '') + '</div>' +
       '<div class="bf-done-row"><b>文件数</b>' + (res.files || 0) + ' 个</div>' +
       (kn ? '<div class="bf-done-row"><b>知识库沉淀</b>技术 ' + (kn.tech || 0) + ' 章 / 商务 ' + (kn.biz || 0) + ' 章</div>' : '') +
+      (res.profileDone && (res.profileDone.tech || res.profileDone.biz)
+        ? '<div class="bf-done-row"><b>专家画像</b>' + [res.profileDone.tech ? '技术' : '', res.profileDone.biz ? '商务' : ''].filter(Boolean).join('、') + '（已自动确认，下次做同类标会用上）</div>'
+        : '') +
       (imp.length ? '<div class="bf-done-row"><b>整理到</b>' + imp.map((x) => esc(x.file) + '（' + x.chapters + ' 章）').join('、') + '</div>' : '') +
     '</div>' +
     (bad.length ? '<div class="bf-warn">有 ' + bad.length + ' 份文件没整理成章节：' + bad.map((x) => esc(x.file) + '（' + esc(x.error) + '）').join('；') + '。文件本身已经存进归档文件夹了。</div>' : '') +
     (res.metaErr ? '<div class="bf-warn">基本信息没识别出来：' + esc(res.metaErr) + '。可以在项目里手动填。</div>' : '') +
     (res.analysisErr ? '<div class="bf-warn">招标文件分析没做完：' + esc(res.analysisErr) + '。文件已归档，可以重新打开项目补做。</div>' : '') +
+    (res.profileErr ? '<div class="bf-warn">专家画像没生成：' + esc(res.profileErr) + '。可以打开项目后在「专家画像」里补做。</div>' : '') +
     '<div class="modal-foot"><button class="btn primary" data-close>知道了</button></div>');
 }
 
 /* ---------- 设置 ---------- */
+// v1.2.3：设置页拆成两块 —— 「模型服务」（可以配好几个，按用途分派）和「其它设置」。
+// 全部都是点点选选，不需要懂技术：服务商给你选好，地址和模型名自动填，只差一个 Key。
+function isLocalBase(u) {
+  return /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])(:|\/|$)/i.test(String(u || '').trim());
+}
+
+function providerRowHtml(p, idx, presets) {
+  const opts = presets.map((x) => '<option value="' + esc(x.kind) + '"' + (x.kind === p.kind ? ' selected' : '') + '>' + esc(x.name) + '</option>').join('');
+  const needKey = (presets.find((x) => x.kind === p.kind) || {}).needKey !== false;
+  return '<div class="prov-item" data-id="' + esc(p.id || '') + '" data-idx="' + idx + '">' +
+    '<div class="prov-head">' +
+      '<input class="prov-name" value="' + esc(p.name || '') + '" placeholder="给这个模型起个名">' +
+      '<select class="prov-kind">' + opts + '</select>' +
+      '<label class="prov-on"><input type="checkbox" class="prov-enabled"' + (p.enabled !== false ? ' checked' : '') + '> 启用</label>' +
+      '<label class="prov-on"><input type="checkbox" class="prov-vision"' + (p.vision ? ' checked' : '') + '> 能看图</label>' +
+      '<button class="btn tiny prov-test">测试连接</button>' +
+      '<button class="btn tiny danger prov-del">删掉</button>' +
+    '</div>' +
+    '<div class="set-hint prov-local" style="margin:-2px 0 8px' + (isLocalBase(p.baseUrl) || p.local ? '' : ';display:none') + '">本机模型：文件不会离开这台电脑</div>' +
+    '<div class="prov-grid">' +
+      '<div class="field"><label>接口地址（Base URL）</label><input class="prov-base" value="' + esc(p.baseUrl || '') + '" placeholder="https://api.deepseek.com"></div>' +
+      '<div class="field"><label>模型名</label><input class="prov-model" value="' + esc(p.model || '') + '" placeholder="deepseek-chat"></div>' +
+      '<div class="field"><label>API Key' + (needKey ? '' : '（本机模型不用填）') + '</label><input class="prov-key" placeholder="' + (p.hasKey ? '已填写（' + esc(p.apiKeyMasked) + '），要换就粘贴新的' : '粘贴你的 Key') + '"></div>' +
+      '<div class="field"><label>超时（秒）</label><input class="prov-timeout" type="number" min="30" max="1800" value="' + esc(p.timeoutSec || 300) + '"></div>' +
+    '</div>' +
+    '<div class="prov-res"></div>' +
+    '</div>';
+}
+
 async function settingsDialog() {
-  const s = S.settings || (await api('GET', '/api/settings'));
-  openModal('<h3>设置</h3><div class="grid">' +
-    '<div class="field full"><label>DeepSeek API Key</label>' +
-      '<input id="stKey" placeholder="' + (s.hasKey ? '已填写（' + esc(s.deepseekApiKeyMasked) + '），要换就粘贴新的' : 'sk-...') + '">' +
-      '<div class="hint">不填也能用工作台的整理和归档功能，只是没有 AI 识别与分析。</div></div>' +
-    '<div class="field"><label>模型</label><input id="stModel" value="' + esc(s.deepseekModel || 'deepseek-flash') + '"></div>' +
-    '<div class="field"><label>投标单位名称</label><input id="stCompany" value="' + esc(s.company || '') + '" placeholder="用于标书封面，可留空"></div>' +
-    '<div class="field full"><label>数据位置</label><input value="' + esc(rootPath()) + '" readonly></div>' +
-    '<div class="field full"><label>版本</label><input id="stVersion" value="' + esc((S.health && S.health.version) || '') + '" readonly><div class="hint">程序升级后这里会跟着变。</div></div>' +
-    '<div class="field full"><label>关闭网页时</label>' +
-      '<div class="ocr-box"><div class="ocr-row">' +
-        '<input type="checkbox" id="stAutoExit"' + (s.autoExitOnClose !== false ? ' checked' : '') + ' style="width:16px;height:16px">' +
-        '<span class="ocr-txt">关掉网页后自动关掉后台服务（如果还有任务在跑，会等任务跑完再关，最长等 30 分钟）</span>' +
-      '</div><div class="ocr-sub">关掉这一项，后台服务就一直开着，需要手动点「关闭工作台」才会退出。</div></div></div>' +
-    '<div class="field full"><label>文字识别（读扫描件用）</label>' +
-      '<div class="ocr-box" id="ocrBox"><span class="loading"></span> 正在检查…</div>' +
-      '<div class="hint">招标文件、投标文件如果是扫描件（图片），需要文字识别才能读出内容。工作台会先自动判断这台电脑有没有可用的识别工具。</div></div>' +
-    '</div><div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okSet">保存</button></div>');
+  const s = await api('GET', '/api/settings');
+  S.settings = s;
+  const presets = s.presets || [];
+  const pv = s.providers || [];
+  const pm = s.purposeMeta || [];
+  const purposes = s.purposes || {};
+  const pvOpts = (sel) => '<option value="">跟着默认模型走</option>' + pv.map((p) => '<option value="' + esc(p.id) + '"' + (sel === p.id ? ' selected' : '') + '>' + esc(p.name) + '（' + esc(p.model) + '）</option>').join('');
+  // 「看图识别」只列支持看图的模型（用户要求：不支持看图的不要出现在下拉框里）
+  const vOpts = (sel) => '<option value="">不用模型，全部走本机识别</option>' + (s.visionProviders || []).map((p) => '<option value="' + esc(p.id) + '"' + (sel === p.id ? ' selected' : '') + '>' + esc(p.name) + '（' + esc(p.model) + '）</option>').join('');
+
+  openModal('<h3>设置</h3>' +
+    '<div class="set-sec">' +
+      '<div class="set-h"><b>模型服务</b><span class="set-sub">AI 靠这里填的模型干活。可以只填一个，也可以填几个，让不同活各用各的模型。</span></div>' +
+      '<div id="pvList">' + (pv.length ? pv.map((p, i) => providerRowHtml(p, i, presets)).join('') : '<div class="prov-empty">还没有模型服务。点下面的「＋ 添加模型服务」。</div>') + '</div>' +
+      '<div class="prov-add"><button class="btn tiny" id="pvAdd">＋ 添加模型服务</button>' +
+        '<select id="pvAddKind" class="prov-sel">' + presets.map((x) => '<option value="' + esc(x.kind) + '">' + esc(x.name) + '</option>').join('') + '</select>' +
+        '<span class="set-hint">选好服务商再点添加，地址和模型名会自动填好</span></div>' +
+    '</div>' +
+    '<div class="set-sec">' +
+      '<div class="set-h"><b>哪个活交给哪个模型</b><span class="set-sub">不选就都用第一个能用的模型。多个模型时，某个挂了会自动换下一个。</span></div>' +
+      '<div class="grid">' + pm.map((x) => {
+        const isV = x.key === 'vision';
+        return '<div class="field"><label>' + esc(x.name) + '</label>' +
+          '<select class="purpose-sel" data-k="' + esc(x.key) + '">' + (isV ? vOpts(purposes[x.key] || '') : pvOpts(purposes[x.key] || '')) + '</select>' +
+          '<div class="hint">' + esc(x.desc) + '</div></div>';
+      }).join('') + '</div>' +
+    '</div>' +
+    '<div class="set-sec">' +
+      '<div class="set-h"><b>其它设置</b></div>' +
+      '<div class="grid">' +
+        '<div class="field"><label>投标单位名称</label><input id="stCompany" value="' + esc(s.company || '') + '" placeholder="用于标书封面，可留空"></div>' +
+        '<div class="field"><label>Word 转 PDF 最长等多久（分钟）</label><input id="stConvTimeout" type="number" min="1" max="60" value="' + esc(Math.round((s.convertedTimeoutSec || 480) / 60)) + '"><div class="hint">大标书转换慢，超过这个时间会自动停下并只做文字类核查。</div></div>' +
+        '<div class="field full"><label>数据位置</label><input value="' + esc(rootPath()) + '" readonly></div>' +
+        '<div class="field full"><label>版本</label><input value="' + esc((S.health && S.health.version) || '') + '" readonly><div class="hint">程序升级后这里会跟着变。</div></div>' +
+        '<div class="field full"><label>关闭网页时</label>' +
+          '<div class="ocr-box"><div class="ocr-row">' +
+            '<input type="checkbox" id="stAutoExit"' + (s.autoExitOnClose !== false ? ' checked' : '') + ' style="width:16px;height:16px">' +
+            '<span class="ocr-txt">关掉网页后自动关掉后台服务（如果还有任务在跑，会等任务跑完再关，最长等 30 分钟）</span>' +
+          '</div><div class="ocr-sub">关掉这一项，后台服务就一直开着，需要手动点「关闭工作台」才会退出。</div></div></div>' +
+        '<div class="field full"><label>文字识别（读扫描件用）</label>' +
+          '<div class="ocr-box" id="ocrBox"><span class="loading"></span> 正在检查…</div>' +
+          '<div class="hint">招标文件、投标文件如果是扫描件（图片），需要文字识别才能读出内容。工作台会先自动判断这台电脑有没有可用的识别工具。</div></div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okSet">保存</button></div>');
   bindOcrBox();
+
+  // 添加 / 删除
+  $('#pvAdd').onclick = () => {
+    const kind = $('#pvAddKind').value;
+    const pre = presets.find((x) => x.kind === kind) || {};
+    const box = $('#pvList');
+    if (box.querySelector('.prov-empty')) box.innerHTML = '';
+    const idx = box.querySelectorAll('.prov-item').length;
+    const html = providerRowHtml({ id: 'p_new_' + Date.now(), kind, name: pre.name, baseUrl: pre.baseUrl, model: pre.model, vision: pre.vision, enabled: true, timeoutSec: 300 }, idx, presets);
+    box.insertAdjacentHTML('beforeend', html);
+    const rows = box.querySelectorAll('.prov-item');
+    bindProviderRow(rows[rows.length - 1], presets);
+  };
+  $('#pvList').querySelectorAll('.prov-item').forEach((el) => bindProviderRow(el, presets));
+
   $('#okSet').onclick = async () => {
-    const body = { deepseekModel: $('#stModel').value.trim(), company: $('#stCompany').value.trim() };
+    const rows = [...$('#pvList').querySelectorAll('.prov-item')];
+    const providers = rows.map((el) => ({
+      id: el.getAttribute('data-id'),
+      name: $('.prov-name', el).value.trim(),
+      kind: $('.prov-kind', el).value,
+      baseUrl: $('.prov-base', el).value.trim(),
+      model: $('.prov-model', el).value.trim(),
+      apiKey: $('.prov-key', el).value.trim(),
+      timeoutSec: Number($('.prov-timeout', el).value) || 300,
+      enabled: $('.prov-enabled', el).checked,
+      vision: $('.prov-vision', el).checked,
+      local: isLocalBase($('.prov-base', el).value)
+    }));
+    const purposes = {};
+    document.querySelectorAll('.purpose-sel').forEach((sel) => { if (sel.value) purposes[sel.getAttribute('data-k')] = sel.value; });
+    const body = { providers, purposes, company: $('#stCompany').value.trim() };
     const ax = $('#stAutoExit');
     if (ax) body.autoExitOnClose = !!ax.checked;
-    const k = $('#stKey').value.trim();
-    if (k) body.deepseekApiKey = k;
+    const ct = Number($('#stConvTimeout').value);
+    if (ct >= 1) body.convertTimeoutSec = Math.round(ct * 60);
     try {
+      await api('POST', '/api/providers', { providers, purposes });
       await api('POST', '/api/settings', body);
       S.settings = await api('GET', '/api/settings');
       closeModal();
       toast('设置已保存');
       loadHealth();
     } catch (e) { toast(e.message, true); }
+  };
+}
+
+// 一条模型服务的交互（切换服务商自动填地址、测试连接、删除）
+function bindProviderRow(el, presets) {
+  const kindSel = $('.prov-kind', el);
+  const syncLocal = () => {
+    const tip = $('.prov-local', el);
+    if (tip) tip.style.display = isLocalBase($('.prov-base', el).value) ? '' : 'none';
+  };
+  $('.prov-base', el).addEventListener('input', syncLocal);
+  kindSel.onchange = () => {
+    const pre = presets.find((x) => x.kind === kindSel.value);
+    if (!pre) return;
+    if (!$('.prov-base', el).value.trim() || presets.some((x) => x.baseUrl && x.baseUrl === $('.prov-base', el).value.trim())) $('.prov-base', el).value = pre.baseUrl || '';
+    if (!$('.prov-model', el).value.trim() || presets.some((x) => x.model && x.model === $('.prov-model', el).value.trim())) $('.prov-model', el).value = pre.model || '';
+    if (!$('.prov-name', el).value.trim() || presets.some((x) => x.name === $('.prov-name', el).value.trim())) $('.prov-name', el).value = pre.name || '';
+    $('.prov-vision', el).checked = !!pre.vision;
+    syncLocal();
+  };
+  $('.prov-del', el).onclick = () => { el.remove(); };
+  $('.prov-test', el).onclick = async () => {
+    const res = $('.prov-res', el);
+    const p = {
+      kind: $('.prov-kind', el).value,
+      baseUrl: $('.prov-base', el).value.trim(),
+      model: $('.prov-model', el).value.trim(),
+      apiKey: $('.prov-key', el).value.trim()
+    };
+    const oldBtn = $('.prov-test', el);
+    res.className = 'prov-res';
+    res.textContent = '正在连…';
+    oldBtn.disabled = true;
+    try {
+      // v1.2.4：Key 输入框里是空的、但这条服务之前存过 Key 时，用存的那把测，
+      // 不能拿空 Key 去测（那样永远报「Key 不正确」）。
+      const savedId = el.getAttribute('data-id') || '';
+      const useSaved = !p.apiKey && savedId && !savedId.startsWith('p_new_');
+      const r = useSaved
+        ? await api('POST', '/api/providers/test', { id: savedId })
+        : await api('POST', '/api/providers/test-draft', { provider: p });
+      if (r.ok) { res.className = 'prov-res ok'; res.textContent = '✅ 连上了，模型回了：' + (r.text || '可以'); }
+      else { res.className = 'prov-res err'; res.textContent = '❌ ' + (r.error || '连不上'); }
+    } catch (e) { res.className = 'prov-res err'; res.textContent = '❌ ' + e.message; }
+    oldBtn.disabled = false;
   };
 }
 
@@ -1754,6 +1925,9 @@ function viewDraft() {
             '<div class="df-drop-t">把 Word 拖到这里</div>' +
             '<div class="df-drop-p">或点下面的按钮选文件（.docx / .doc）</div>' +
             '<button class="btn" id="btnImport">上传我写的 Word</button>' +
+            '<div class="df-drop-hint">' + (d.mode === 'merged'
+              ? '现在按「合并成一份」处理 —— 直接把整本标书传上来就行。如果你的标书是价格、商务技术、资格证明三份分开的，先点顶上的「改成三份」再传。'
+              : '现在按「分三份」处理 —— 请分别传价格文件、商务技术文件、资格证明文件。如果只有一整本，先点顶上的「合并一份」再传。') + '</div>' +
           '</div>' +
         '</div>' +
       '</div>' +
@@ -1771,9 +1945,7 @@ function viewDraft() {
           (cur.status === 'archived' ? '' : 
           '<button class="btn tiny" data-ch="' + c.id + '" data-go="write">' + (chars ? '重写' : 'AI 写正文') + '</button>' +
           (chars ? '<button class="btn tiny" data-ch="' + c.id + '" data-go="expand">扩写</button>' : '')) +
-          (c.role === 'tech' || c.role === 'biz'
-            ? '<button class="btn tiny indep" data-indep="' + c.id + '" title="独立编制：开一个独立窗口，和 AI 边聊边改，可以生成图/表、导出验收用 Word">编制</button>'
-            : '')
+          ''
         : (needRow ? '<button class="btn tiny" data-ch="' + c.id + '" data-go="table">查看/编辑</button>' : '');
       const lv = Number(c.level) || 1;
       const pad = lv >= 3 ? 52 : lv === 2 ? 26 : 0;
@@ -1795,8 +1967,13 @@ function viewDraft() {
             (c.role === 'tech' ? '重要技术' : '重要商务') + '</span>'
           : '<span class="tag role-none" data-rolebtn="' + c.id + '" title="标为重要内容，AI 会按技术/商务专家模式写">＋ 重要</span>')
         : '';
+      // v1.2.2：「编制」按钮从底部按钮行挪到标题行，跟在「重要技术/重要商务」标签后面。
+      // 原来它和 查看/编辑、重写、扩写、改名、删 挤在同一行，一多就换行，整行高度失控。
+      const indepBtn = (c.type === 'normal' && (c.role === 'tech' || c.role === 'biz'))
+        ? '<button class="btn tiny indep df-ch-indep" data-indep="' + c.id + '" title="独立编制：开一个独立窗口，和 AI 边聊边改，可以生成图/表、导出验收用 Word">编制</button>'
+        : '';
       const main = '<div class="df-ch-main" data-ch="' + c.id + '" data-go="open" style="padding-left:' + pad + 'px">' +
-        '<div class="df-ch-t' + titleCls + '">' + esc(numTxt + c.title) + ' ' + (typeTagText && typeTagText !== c.title ? typeTag : '') + ' ' + roleTag + ' ' + srcTag + '</div>' +
+        '<div class="df-ch-t' + titleCls + '">' + esc(numTxt + c.title) + ' ' + (typeTagText && typeTagText !== c.title ? typeTag : '') + ' ' + roleTag + indepBtn + ' ' + srcTag + '</div>' +
         '<div class="df-ch-s">' + esc(c.hint || '') + '</div></div>' +
         '<div class="df-ch-n">' + cnt + '</div>' +
         '<div class="df-ch-a">' + actions +
@@ -1886,10 +2063,39 @@ async function dfDoImport(f) {
     const r = await upload('/api/projects/' + S.cur.id + '/draft/' + st.doc + '/import', f);
     const list = (r.titles || []).slice(0, 12).map((t) => esc((t.number ? t.number + ' ' : '') + t.title)).join('、');
     const deepNote = r.skippedDeep ? '三级及更深的 ' + r.skippedDeep + ' 个小标题已并入上一级章节正文。' : '';
+
+    // v1.2.1：上传完成后自动判一遍章节性质（重要技术 / 重要商务）。
+    // 上传已经存盘了，这里才跑，不和上传抢资源；跑的时候弹窗锁住，别让用户以为没反应。
+    let roleHtml = '';
+    let roleWarn = '';
+    const archived = S.cur.status === 'archived';
+    if (archived) {
+      roleWarn = '';
+    } else if (st.apiReady) {
+      openModal('<h3>已按你上传的标书替换</h3><p>文件：' + esc(f.name) + '</p>' +
+        '<p>共 <b>' + r.chapters + '</b> 章。正在自动识别哪些章节是重要技术、哪些是重要商务，这一步要几十秒，请稍等…</p>' +
+        '<div class="ck-run" style="margin-top:8px"><span class="loading"></span> <span>AI 正在读每一章的标题和内容…</span></div>');
+      setModalLock(true);
+      try {
+        const rr = await api('POST', '/api/projects/' + S.cur.id + '/draft/' + st.doc + '/review-roles', {});
+        roleHtml = '<p class="ok-line">✅ 已自动识别：重要技术 <b>' + rr.counts.tech + '</b> 章、重要商务 <b>' + rr.counts.biz + '</b> 章。' +
+          (rr.counts.none ? '其余 ' + rr.counts.none + ' 章标为一般章节。' : '') + '</p>';
+      } catch (e) {
+        roleWarn = '自动识别章节性质失败：' + (e && e.message || e);
+      } finally {
+        setModalLock(false);
+      }
+    } else {
+      roleWarn = '还没填 DeepSeek API Key，暂时不能自动识别章节性质。填好后点上面的「AI 复核章节性质」即可。';
+    }
+
     openModal('<h3>已按你上传的标书替换</h3><p>文件：' + esc(f.name) + '</p>' +
       '<p>现在这份文件完全按你上传的章节与顺序排列，只列一级、二级标题，共 <b>' + r.chapters + '</b> 章，序号用你 Word 里的原编号（之前的自动框架已备份，可以一键恢复）。</p>' +
+      roleHtml +
+      (roleWarn ? '<p class="muted" style="font-size:13px;color:#96650c">' + esc(roleWarn) + '</p>' : '') +
       (deepNote ? '<p class="muted" style="font-size:13px">' + deepNote + '</p>' : '') +
       (list ? '<p class="muted" style="font-size:13px">前几章：' + list + (r.titles.length > 12 ? ' 等' : '') + '</p>' : '') +
+      '<p class="muted" style="font-size:12.5px">不满意可以再点上面的「AI 复核章节性质」重新判一次，也可以点章节标题后面的「＋ 重要」自己标。</p>' +
       '<div class="modal-foot"><button class="btn primary" data-close>好</button></div>');
     dfSetMsg('');
     await reloadDraft();
@@ -2375,7 +2581,8 @@ async function loadCheckFor(pid) {
       taskId: null,
       timer: null,
       running: !!(r.running && r.running.taskId),
-      msg: (r.running && r.running.message) || ''
+      msg: (r.running && r.running.message) || '',
+      task: r.running || null
     };
     // v1.1.5：切回页面时把还在跑的核查任务接上
     if (r.running && r.running.taskId && !S.ck.timer) ckPoll(r.running.taskId, true);
@@ -2485,6 +2692,8 @@ function ckDocCard(d) {
       (d.warn ? '<span class="tag tag-amber">待核对 ' + d.warn + '</span>' : '') +
       (!d.fatal && !d.warn ? '<span class="tag tag-green">全部通过</span>' : '') +
     '</div>' +
+    (d.degraded ? '<div class="ck-deg"><b>这份文件只做了文字类核查。</b><br>' + esc(d.degraded) +
+      '<br>空白页、页码连续性、封面正副本标注这三项要靠真实排版才看得出来，自动核查跳过了，请你递交前人工翻一遍。</div>' : '') +
     ckFold('fmt:' + d.id, '格式与要素检查', fmtSummary,
       '<table class="ck-tbl"><thead><tr><th style="width:74px">结论</th><th style="width:30%">检查项</th><th>具体情况</th><th style="width:24%">怎么改</th></tr></thead><tbody>' +
       rows + '</tbody></table>') +
@@ -2575,23 +2784,40 @@ function viewCheck() {
   '</div>';
 
   if (ck.running) {
-    return head + '<div class="card"><div class="ck-run"><span class="loading"></span> <span id="ckMsg">' + esc(ck.msg || '正在核查…') + '</span></div>' +
-      '<p class="muted" style="font-size:13px;margin:10px 0 0">核查要用 Word 把每份文件转成 PDF 再逐页读，再让 AI 逐条对照招标要求并逐项模拟评标。' + (ck.hasAnalysis ? '一份大概 2～5 分钟，招标要求越多越久，请耐心等它跑完。' : '一份大约 30 秒～1 分钟。') + '</p></div>';
+    const t = ck.task || {};
+    const sec = t.elapsedSec || 0;
+    const mm = Math.floor(sec / 60), ss = sec % 60;
+    const elapsed = sec ? (mm ? mm + ' 分 ' + ss + ' 秒' : ss + ' 秒') : '刚起步';
+    return head + '<div class="card"><div class="ck-prog">' +
+      '<div class="ckp-t"><span class="loading"></span> 正在核查（<span id="ckStage">' + esc(t.stage || '准备') + '</span>）</div>' +
+      '<div class="ckp-m" id="ckMsg">' + esc(ck.msg || '正在核查…') + '</div>' +
+      '<div class="ckp-f">已经用了 <span id="ckElapsed">' + esc(elapsed) + '</span>' +
+        (t.total ? ' · 第 <span id="ckDocIdx">' + (t.docIndex || 0) + '/' + t.total + '</span> 份文件' : '') +
+        ' · 这期间可以切到别的页签，任务不会断</div>' +
+      '<div class="ckp-b"><button class="btn" id="btnStopCheck">停止本次核查</button></div>' +
+      '</div>' +
+      '<p class="muted" style="font-size:13px;margin:12px 0 0">核查要用 Word 把每份文件转成 PDF 再逐页读，再让 AI 逐条对照招标要求并逐项模拟评标。' + (ck.hasAnalysis ? '一份大概 2～5 分钟，招标要求越多越久。' : '一份大约 30 秒～1 分钟。') +
+      '如果 Word 转换卡住了，超过设定的时间会自动停下、只做文字类核查，也可以随时点上面的「停止本次核查」。</p></div>';
   }
 
   const finals = ck.sources.filter((s) => s.final);
-  const others = ck.sources.filter((s) => !s.final);
+  const others = ck.sources.filter((s) => !s.final && !s.excluded);
+  const excluded = ck.sources.filter((s) => s.excluded);
   const srcItem = (s) => '<label class="ck-src-i"><input type="checkbox" data-src="' + esc(s.id) + '"' + (ck.selected.has(s.id) ? ' checked' : '') + '>' +
     '<span class="ck-src-n">' + esc(s.name) + '</span>' +
     (s.origin === 'upload' ? '<span class="tag tag-green">' + esc(s.label || '你上传的最终版') + '</span>'
-      : s.origin === 'export' ? '<span class="tag tag-gray">' + esc(s.label || '工作台生成') + '</span>' : '') +
+      : s.origin === 'export' ? '<span class="tag tag-gray">' + esc(s.label || '工作台生成') + '</span>'
+      : s.suspect ? '<span class="tag tag-amber">' + esc(s.label || '不确定是不是投标文件') + '</span>' : '') +
     '<span class="muted">' + fmtSize(s.size) + '</span></label>';
   const srcBox = '<div class="card ck-src">' +
     '<div class="ck-src-h"><b>可以核查的文件</b><span class="muted">默认只勾最终要投的那份：上传过 Word 的以你上传的原件为准，工作台自动生成的草稿不默认核查</span></div>' +
-    (ck.sources.length ? '<div class="ck-src-list">' + finals.map(srcItem).join('') + '</div>'
-      : '<div class="muted" style="padding:8px 0">还没有可核查的文件。请先到「投标文件」把做好的标书下载成 Word 放回 03制作 文件夹，或直接上传到项目的「04核查」文件夹。</div>') +
-    (others.length ? '<details class="ck-src-more"><summary>其他文件（自动生成的草稿 / 历史版本，默认不核查）' + others.length + ' 份</summary>' +
+    (finals.length ? '<div class="ck-src-list">' + finals.map(srcItem).join('') + '</div>'
+      : '<div class="ck-note" style="margin-top:4px">⚠ 没找到你的最终版投标文件。<br>请到「投标文件」页签上传做好的标书（Word / PDF 都行），或者把文件拖到项目文件夹的 04核查 里，再回来点「开始核查」。<br>（招标文件、招标公告这类文件不会被当成投标文件，已经自动排除掉了。）</div>') +
+    (others.length ? '<details class="ck-src-more"><summary>其他文件（自动生成的草稿 / 历史版本 / 名字不标准的，默认不核查）' + others.length + ' 份</summary>' +
       '<div class="ck-src-list">' + others.map(srcItem).join('') + '</div></details>' : '') +
+    (excluded.length ? '<details class="ck-src-more"><summary>已自动排除（招标类文件，不是投标文件）' + excluded.length + ' 份</summary>' +
+      '<div class="ck-src-list">' + excluded.map((s) => '<div class="ck-src-i ck-src-ex"><span class="ck-src-n">' + esc(s.name) + '</span>' +
+        '<span class="tag tag-gray">' + esc(s.label || '招标类文件') + '</span><span class="muted">' + fmtSize(s.size) + '</span></div>').join('') + '</div></details>' : '') +
     (ck.hasAnalysis ? '<div class="ck-note ok">已做招标分析：会把招标文件的每一项要求逐条拿去和投标文件比对，并按评分表逐项拆解模拟打分。印刷、密封、现场递交这几类电子文件看不出的要求会单独标成「部分响应」，提醒你递交时人工确认。</div>' : '<div class="ck-note">还没做招标分析，只能查格式类问题（空白页、页码、封面、占位符）。要做逐条响应比对和模拟评标，请先到「招标分析」跑一次。</div>') +
   '</div>';
 
@@ -2615,12 +2841,35 @@ function bindCheckEvents() {
   if (run) run.onclick = async () => {
     const ids = Array.from(document.querySelectorAll('[data-src]')).filter((x) => x.checked).map((x) => x.dataset.src);
     if (!ids.length) { toast('请先勾选要核查的文件', true); return; }
+    // v1.2.3：如果上一次还在跑（不是卡死），先问一句，别把好好的任务顶掉
+    if (S.ck && S.ck.running && S.ck.taskId) {
+      const t = S.ck.task || {};
+      const live = (t.idleSec || 0) < 180;
+      const ask = live
+        ? '上一次核查还在跑（' + (t.stage || '处理中') + '，已经 ' + (t.elapsedSec || 0) + ' 秒），要重新开始吗？\n选「确定」会停掉正在跑的这次。'
+        : '上一次核查看起来卡住了，要重新开始吗？';
+      if (!confirm(ask)) return;
+      try { await api('POST', '/api/check-tasks/' + S.ck.taskId + '/stop'); } catch {}
+      if (S.ck.timer) { clearInterval(S.ck.timer); S.ck.timer = null; }
+      S.ck.running = false;
+    }
     try {
       const r = await api('POST', '/api/projects/' + S.cur.id + '/check', { ids });
-      if (S.ck) { S.ck.running = true; S.ck.msg = r.message || '正在核查…'; }
+      if (S.ck) { S.ck.running = true; S.ck.msg = r.message || '正在核查…'; S.ck.task = r; }
       renderProject();
       ckPoll(r.id);
     } catch (e) { toast(e.message, true); }
+  };
+  // v1.2.3：停止本次核查
+  const stop = $('#btnStopCheck');
+  if (stop) stop.onclick = async () => {
+    if (!S.ck || !S.ck.taskId) return;
+    if (!confirm('停止这次核查？已经查完的部分不会保留，下次点「开始核查」会重新跑。')) return;
+    stop.disabled = true;
+    stop.textContent = '正在停止…';
+    try {
+      await api('POST', '/api/check-tasks/' + S.ck.taskId + '/stop');
+    } catch (e) { toast(e.message, true); stop.disabled = false; stop.textContent = '停止本次核查'; }
   };
   const ex = $('#btnExportCheck');
   if (ex) ex.onclick = async () => {
@@ -2676,20 +2925,53 @@ function bindCheckEvents() {
   });
 }
 
+let CK_FAILS = 0;
 function ckPoll(taskId, silent) {
   if (S.ck && S.ck.timer) clearInterval(S.ck.timer);
   if (S.ck) { S.ck.taskId = taskId; S.ck.running = true; }
+  CK_FAILS = 0;
   S.ck.timer = setInterval(async () => {
     let t;
-    try { t = await api('GET', '/api/check-tasks/' + taskId); t = t.task || t; } catch { return; }
+    try {
+      t = await api('GET', '/api/check-tasks/' + taskId);
+      t = t.task || t;
+      CK_FAILS = 0;
+    } catch (e) {
+      // v1.2.3：以前这里静默吞掉错误，后台断了页面上永远「正在核查」。
+      // 现在连续 3 次取不到状态就明说，并给出可点的操作。
+      CK_FAILS += 1;
+      if (CK_FAILS >= 3 && S.ck && S.ck.taskId === taskId) {
+        clearInterval(S.ck.timer);
+        S.ck.timer = null;
+        S.ck.running = false;
+        S.ck.pollFail = true;
+        if (S.cur) renderProject();
+        toast('连不上后台（取核查进度失败），任务可能还在跑。可以等一下再刷新页面看看。', true);
+      }
+      return;
+    }
     if (!S.ck || S.ck.taskId !== taskId) { clearInterval(S.ck.timer); return; }
+    // 进度条更新（不整页重画，避免打断点点点）
+    S.ck.task = t;
+    S.ck.msg = t.message || '正在核查…';
     const m = $('#ckMsg');
-    if (m) m.textContent = t.message || '正在核查…';
+    if (m) m.textContent = S.ck.msg;
+    const st = $('#ckStage');
+    if (st) st.textContent = t.stage || '准备';
+    const el = $('#ckElapsed');
+    if (el && t.elapsedSec !== undefined) {
+      const mm = Math.floor(t.elapsedSec / 60), ss = t.elapsedSec % 60;
+      el.textContent = (mm ? mm + ' 分 ' + ss + ' 秒' : ss + ' 秒');
+    }
+    const di = $('#ckDocIdx');
+    if (di && t.total) di.textContent = (t.docIndex || 0) + '/' + t.total;
     if (t.state !== 'running') {
       clearInterval(S.ck.timer);
       S.ck.timer = null;
       S.ck.running = false;
       if (t.state === 'error') toast('核查失败：' + t.message, true);
+      else if (t.state === 'stalled') toast('上次核查卡住了：' + t.message, true);
+      else if (t.state === 'stopped') toast(t.message || '已停止');
       else toast(t.message || '核查完成');
       await loadCheckFor(S.cur.id);
     }
@@ -2995,10 +3277,14 @@ async function renderArchiveList() {
         return '<div class="arch-i"><div class="arch-h"><b>' + esc(a.name) + '</b>' +
           (a.check && a.check.verdict === 'red' ? '<span class="tag tag-red">核查有问题</span>' : '') +
           (a.check && a.check.verdict === 'green' ? '<span class="tag tag-green">全部通过</span>' : '') +
+          (a.dupCount ? '<span class="tag tag-amber" title="同名同编号的归档还有 ' + a.dupCount + ' 份，下面可以单独打开">有重复归档</span>' : '') +
         '</div>' +
         '<div class="arch-m">' + esc(a.code || '') + (a.owner ? ' · ' + esc(a.owner) : '') + (a.budget ? ' · 预算 ' + esc(a.budget) : '') + '</div>' +
         '<div class="arch-dl">投标截止：' + dlTxt + '</div>' +
         '<div class="arch-p">' + esc(a.path) + '</div>' +
+        (a.dups && a.dups.length ? '<div class="arch-dup"><span class="muted">另外 ' + a.dups.length + ' 份同名同编号的归档：</span>' +
+          a.dups.map((x) => '<button class="btn tiny" data-reveal="' + esc(x.path) + '">' + esc(x.folder) + '（' + esc(String(x.archivedAt).slice(0, 10)) + '）</button>').join('') +
+          '<div class="muted" style="font-size:12px">这些资料都在，只是列表里只显示最新的一份。</div></div>' : '') +
         '<div class="arch-a"><span class="muted">归档于 ' + esc(String(a.archivedAt).slice(0, 10)) + '</span>' +
         '<span class="row" style="gap:6px">' +
           '<button class="btn tiny" data-reveal="' + esc(a.path) + '">打开文件夹</button>' +

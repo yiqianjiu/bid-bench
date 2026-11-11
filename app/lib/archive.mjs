@@ -166,7 +166,10 @@ export function archiveProject(project, db, opt = {}) {
     if (!fs.existsSync(probe)) break;
     let oldId = '';
     try { oldId = String((JSON.parse(fs.readFileSync(probe, 'utf8')).project || {}).id || ''); } catch {}
-    if (!oldId || oldId === project.id) break;
+    // v1.2.1：只有「确实是同一个项目重新归档」才复用原文件夹。
+    // 原来写成 !oldId 也 break —— 早期归档的摘要里没有项目 id，会被当成自己，
+    // 结果两个同名同编号项目归档到同一个文件夹、互相覆盖（这就是重复归档的根因）。
+    if (oldId && oldId === project.id) break;
     folder = baseFolder + '（' + n + '）';
   }
   const dst = path.join(ARCHIVE_DIR, year, folder);

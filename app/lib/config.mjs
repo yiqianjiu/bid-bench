@@ -24,7 +24,9 @@ export const DEFAULT_CONFIG = {
   company: '',
   // v1.1.5：关掉网页就自动关掉后台服务（默认开）。关掉后需要手动点「关闭工作台」
   autoExitOnClose: true,
-  version: '1.2.0'
+  // v1.2.3：Word 转 PDF 最长等多久（秒）。超大标书要几分钟，超过就停下并降级为文字类核查
+  convertTimeoutSec: 480,
+  version: '1.2.4'
 };
 
 export function ensureDirs() {

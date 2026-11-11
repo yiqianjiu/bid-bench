@@ -7,7 +7,7 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body class="indep-body">
-<div class="indep">
+<div class="indep-page">
   <header class="indep-head">
     <div class="indep-title">
       <b id="ipTitle">独立编制</b>
@@ -56,9 +56,29 @@
       </div>
 
       <div class="indep-doc" id="ipDoc">
+        <div class="pv-bar" id="ipPvBar">
+          <span class="pv-bar-t" id="ipPvInfo">版面预览</span>
+          <div class="pv-bar-r">
+            <button class="btn tiny" id="ipRailBtn" title="显示/收起右侧配图栏" hidden>配图栏</button>
+            <label class="pv-hd" title="预览图按更高清晰度重新生成，放大看不糊（每页图约大 80%）"><input type="checkbox" id="ipHd"> 高清</label>
+            <div class="pv-zoom">
+              <button id="ipZoomOut" title="缩小（Ctrl+滚轮也可以）">－</button>
+              <select class="pv-zoom-sel" id="ipZoomSel" title="缩放比例">
+                <option value="fit">适应宽度</option>
+                <option value="0.5">50%</option>
+                <option value="0.75">75%</option>
+                <option value="1">100%</option>
+                <option value="1.25">125%</option>
+                <option value="1.5">150%</option>
+                <option value="2">200%</option>
+              </select>
+              <button id="ipZoomIn" title="放大（Ctrl+滚轮也可以）">＋</button>
+            </div>
+          </div>
+        </div>
         <div class="pv-grid" id="ipPv">
-          <div class="pv-pages" id="ipPages"></div>
-          <div class="pv-rail" id="ipRail"></div>
+          <div class="pv-pages" id="ipPages"><div class="pv-canvas" id="ipCanvas"></div></div>
+          <div class="pv-rail" id="ipRail" hidden></div>
         </div>
         <textarea class="indep-text" id="ipText" style="display:none" placeholder="还没有内容。点「编制生成」，AI 会按招标文件要求和专家画像写一版；也可以直接在这里写。"></textarea>
         <div class="pv-empty" id="ipPvEmpty" hidden></div>

@@ -2,13 +2,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR, PROJECT_DIR } from './config.mjs';
-import { uid, nowIso } from './util.mjs';
+import { uid, nowIso, sha256 } from './util.mjs';
 import { docxToPdf, docToDocx, extractPdfText, extractDocxText, getPageInfo } from './extract.mjs';
 import { apiReady } from './ai.mjs';
 import { aiRequirementCheck, aiDeepScore, guessKind, reqSectionsFor, flattenRequirements } from './checkAI.mjs';
 import { loadDraft } from './draft.mjs';
 import { renderPdfPages } from './extract.mjs';
 import { ocrImageFile, detectOcr } from './ocr.mjs';
+import { sleep } from './convert.mjs';
 
 export const CHECK_DIR = path.join(DATA_DIR, '核查');
 const TASKS_DIR = path.join(CHECK_DIR, '.tasks');
@@ -47,10 +48,37 @@ export function parseDocName(name) {
   return { docKey: null, origin: 'other', baseName: name };
 }
 
+// v1.2.1：招标类文件的特征（这类文件永远不是「投标文件」，绝不能进核查候选）
+const TENDER_NAME_RE = /招标文件|招标公告|投标邀请|采购文件|磋商文件|询比文件|谈判文件|竞价文件|资格预审文件|澄清|答疑|更正公告|中标公告|中标结果/;
+
+// 把「01招标文件」里所有文件的指纹（SHA-256）算出来：和它内容完全一样的，一定是招标文件
+function tenderFingerprints(dir) {
+  const map = new Map();
+  const d = path.join(dir, '01招标文件');
+  if (!fs.existsSync(d)) return map;
+  const walk = (dd) => {
+    let names = [];
+    try { names = fs.readdirSync(dd); } catch { return; }
+    for (const name of names) {
+      const fp = path.join(dd, name);
+      let st;
+      try { st = fs.statSync(fp); } catch { continue; }
+      if (st.isDirectory()) { walk(fp); continue; }
+      if (!st.isFile() || st.size > 200 * 1024 * 1024) continue;
+      try {
+        map.set(sha256(fs.readFileSync(fp)), name);
+      } catch {}
+    }
+  };
+  walk(d);
+  return map;
+}
+
 export function listSources(project) {
   const dir = path.join(PROJECT_DIR, project.dir || '');
   const out = [];
   const seen = new Map();
+  const tenderHashes = tenderFingerprints(dir);
   const scan = (sub, stage) => {
     const d = path.join(dir, sub);
     if (!fs.existsSync(d)) return;
@@ -65,6 +93,28 @@ export function listSources(project) {
       // 工作台自己生成的报告不算待核查的投标文件
       if (/^(核查报告|递交行动清单|关键信息清单)_/.test(name)) continue;
       const meta = parseDocName(name);
+      // ---- 闸门1：文件名一看就是招标类文件 → 直接排除 ----
+      if (TENDER_NAME_RE.test(name)) {
+        out.push({
+          id: stage + ':' + name, stage, name, baseName: meta.baseName, docKey: meta.docKey,
+          origin: 'tender', path: fp, relPath: sub + '/' + name, size: st.size,
+          mtime: st.mtime.toISOString(), ext, final: false,
+          label: '这是招标类文件，不是投标文件', excluded: true
+        });
+        continue;
+      }
+      // ---- 闸门2：内容和「01招标文件」里某份完全一样 → 也排除（改名了也认得出） ----
+      let fpHash = '';
+      try { if (st.size <= 200 * 1024 * 1024) fpHash = sha256(fs.readFileSync(fp)); } catch {}
+      if (fpHash && tenderHashes.has(fpHash)) {
+        out.push({
+          id: stage + ':' + name, stage, name, baseName: meta.baseName, docKey: meta.docKey,
+          origin: 'tender', path: fp, relPath: sub + '/' + name, size: st.size,
+          mtime: st.mtime.toISOString(), ext, final: false,
+          label: '这份和招标文件内容完全一样（' + tenderHashes.get(fpHash) + '），不是投标文件', excluded: true
+        });
+        continue;
+      }
       // 去重键要带 docKey：同一份原始标书可能以「导入_price_…」「导入_merged_…」两个身份导入过
       const key = (meta.docKey || '') + '|' + meta.baseName.replace(/\.[^.]+$/, '') + '|' + st.size;
       const prev = seen.get(key);
@@ -110,12 +160,24 @@ export function listSources(project) {
     } else if (row.origin === 'export') {
       row.final = inMode && !uploaded;
       row.label = uploaded ? '工作台生成的草稿（不核查）' : '工作台生成';
-    } else {
-      row.final = true;
-      row.label = '其他文件';
+    } else if (!row.excluded) {
+      // ---- 闸门3：文件名不标准（既不是导入的、也不是工作台导出的）→ 一律不当最终版 ----
+      // 以前这里直接 final=true，导致随手放进来的招标文件被当成投标文件去核查。
+      row.final = false;
+      row.label = '名字不标准，不确定是不是投标文件';
+      row.suspect = true;
+    }
+    // 已被闸门1/闸门2 判定为招标类文件的，保留原来的排除理由，不要被覆盖
+  }
+  // ---- 闸门4：一份合格候选都没有时，不再「全勾兜底」 ----
+  // 只在「确实没有任何上传版/导出版」时，才把名字不标准的文件列出来给用户确认（默认不勾）。
+  if (!out.some((x) => x.final)) {
+    const suspects = out.filter((x) => x.suspect && !x.excluded);
+    if (!out.some((x) => x.origin === 'upload' || x.origin === 'export') && suspects.length === 1) {
+      suspects[0].final = true;
+      suspects[0].label = '没找到你的投标文件，先拿它顶上——请确认这份是不是你的标书';
     }
   }
-  if (!out.some((x) => x.final)) out.forEach((x) => { x.final = true; });
 
   out.sort((a, b) => (b.final ? 1 : 0) - (a.final ? 1 : 0) || String(b.mtime).localeCompare(String(a.mtime)));
   return out;
@@ -362,47 +424,72 @@ function pruneConv() {
   } catch {}
 }
 
-async function checkOneDoc(project, src, analysis) {
+async function checkOneDoc(project, src, analysis, opts) {
+  const o = opts || {};
+  const onStage = typeof o.onStage === 'function' ? o.onStage : () => {};
+  const signal = o.signal;
+
   fs.mkdirSync(CONV_DIR, { recursive: true });
   pruneConv();
 
-  const stamp = safeName(src.baseName || src.name).replace(/\.[^.]+$/, '') + '_' + src.size;
+  // v1.2.3：缓存键加上文件修改时间。同名同文件不同版本（改了内容但大小没变）不会再命中旧缓存。
+  const mtimeMs = src.mtime ? Date.parse(src.mtime) || 0 : 0;
+  const stamp = safeName(src.baseName || src.name).replace(/\.[^.]+$/, '') + '_' + src.size + '_' + mtimeMs;
   const pdfPath = path.join(CONV_DIR, stamp + '.pdf');
   let sourceForPdf = src.path;
+  let docxForText = null;
 
   // .doc → 先另存为 .docx
   if (src.ext === '.doc') {
     const docxPath = path.join(CONV_DIR, stamp + '.docx');
     if (!fs.existsSync(docxPath)) {
       try {
-        fs.writeFileSync(docxPath, docToDocx(src.path, docxPath));
+        fs.writeFileSync(docxPath, await docToDocx(src.path, docxPath, { onProgress: o.onProgress, signal }));
       } catch (e) {
+        if (e && e.code === 'CONVERT_CANCELLED') throw e;
         throw new Error('这份老版 Word（.doc）打不开：' + (e && e.message ? e.message : e) + '。请在 Word 里另存为 .docx 再上传。');
       }
     }
     sourceForPdf = docxPath;
+    docxForText = docxPath;
+  } else if (src.ext === '.docx') {
+    docxForText = src.path;
   }
 
   // .docx → Word 另存 PDF（页码、空白页、正副本标注都要看真实排版）
+  let degradedReason = '';
   if (sourceForPdf !== src.path || src.ext === '.docx') {
     if (!fs.existsSync(pdfPath)) {
       let lastErr = null;
       for (let attempt = 0; attempt < 2; attempt++) {
+        if (signal && signal.aborted) { const e2 = new Error('已取消'); e2.code = 'CONVERT_CANCELLED'; throw e2; }
         try {
-          docxToPdf(sourceForPdf, pdfPath);
+          await docxToPdf(sourceForPdf, pdfPath, { onProgress: o.onProgress, signal });
           lastErr = null;
           break;
         } catch (e) {
+          if (e && e.code === 'CONVERT_CANCELLED') throw e;
           lastErr = e;
-          await new Promise((r) => setTimeout(r, 2000));
+          // 超时了就别再重试，直接走降级，不然要白等两个 8 分钟
+          if (e && (e.code === 'CONVERT_TIMEOUT' || e.code === 'CONVERT_STALLED')) break;
+          await sleep(2000);
           try { if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath); } catch {}
         }
       }
       if (lastErr) {
-        throw new Error('这份 Word 转成 PDF 失败（' + (lastErr.message || lastErr) + '）。常见原因：Word 窗口卡住没关。请在任务管理器里结束 WINWORD 后重试。');
+        degradedReason = (lastErr && lastErr.message) || String(lastErr) || 'Word 转 PDF 失败';
       }
     }
-    sourceForPdf = pdfPath;
+    if (!degradedReason) sourceForPdf = pdfPath;
+  }
+
+  // ---- 降级：转不了 PDF 时只做「文字类核查」，不让整次核查失败 ----
+  if (degradedReason) {
+    const fallback = await textPagesFallback(src, docxForText);
+    if (!fallback) {
+      throw new Error(degradedReason + ' 这份是 .doc 老格式，不能只读文字，请在 Word 里另存为 .docx 再上传。');
+    }
+    return { pages: fallback, pageInfo: [], text: fallback.map((p) => p.text || '').join('\n'), degraded: degradedReason };
   }
 
   const buf = fs.readFileSync(sourceForPdf);
@@ -419,15 +506,16 @@ async function checkOneDoc(project, src, analysis) {
   if (text.replace(/\s/g, '').length < 200 && pages.length) {
     const tool = detectOcr();
     if (tool.available) {
+      onStage('这份是扫描件，正在用本机 OCR 识别文字…');
       const maxPage = Math.min(pages.length, 60);
       const nums = [];
       for (let i = 1; i <= maxPage; i++) nums.push(i);
       try {
         const imgs = await renderPdfPages(buf, nums, 2);
-        const os = await import('node:os');
         const tmpDir = path.join(CONV_DIR, 'ocr');
         fs.mkdirSync(tmpDir, { recursive: true });
         for (const n of nums) {
+          if (signal && signal.aborted) { const e2 = new Error('已取消'); e2.code = 'CONVERT_CANCELLED'; throw e2; }
           const img = imgs.get(n);
           if (!img) continue;
           const fp = path.join(tmpDir, stamp + '_p' + n + '.png');
@@ -439,12 +527,36 @@ async function checkOneDoc(project, src, analysis) {
         }
         text = pages.map((p) => p.text || '').join('\n');
       } catch (e) {
+        if (e && e.code === 'CONVERT_CANCELLED') throw e;
         // 识别失败不阻断核查，按原来的「文字核对不到」提示继续
       }
     }
   }
 
-  return { pages, pageInfo, text };
+  return { pages, pageInfo, text, degraded: '' };
+}
+
+// 转不了 PDF 时的兜底：从 Word 里抽纯文字，按长度切成「伪页」，只够做文字类核查
+async function textPagesFallback(src, docxPath) {
+  const target = docxPath || (src.ext === '.docx' ? src.path : null);
+  if (!target) return null;
+  let text = '';
+  try { text = await extractDocxText(fs.readFileSync(target)); } catch { return null; }
+  const clean = String(text || '').replace(/\r/g, '').trim();
+  if (!clean) return null;
+  const size = 2400;
+  const out = [];
+  for (let i = 0; i < clean.length; i += size) {
+    out.push({ page: out.length + 1, text: clean.slice(i, i + size) });
+  }
+  return out;
+}
+
+// 降级时只能做这些文字类检查（页码、空白页、正副本标注要真实排版，做不了）
+function textOnlyRuleCheck(pages, project, doc) {
+  const fake = ruleCheck(pages, project, doc, []);
+  const keep = new Set(['placeholder', 'date', 'idfill']);
+  return fake.filter((x) => keep.has(x.key));
 }
 
 // ---------- 逐条核查 / 评标 由 checkAI.mjs 负责 ----------
@@ -456,23 +568,92 @@ export function requirementSummary(doc) {
 }
 
 // ---------- 任务 ----------
+// v1.2.3：核查任务加了「阶段 / 已用时 / 最后活动时间 / 可停止」，
+// 用来把「正在读取文件」这种笼统提示换成看得懂的进度，并让僵死可判定。
 const tasks = new Map();
+const STALL_MS = 180 * 1000;      // 3 分钟没有任何进展 → 判定卡死
+const WATCH_MS = 10 * 1000;
 
 function taskFile(id) { return path.join(TASKS_DIR, id + '.json'); }
-function persist(t) { try { fs.writeFileSync(taskFile(t.id), JSON.stringify(t, null, 2), 'utf8'); } catch {} }
+function persist(t) {
+  try {
+    // 不要把 AbortController 这种运行时对象写进 json（会变成 {}，重启后读出来是个假对象）
+    const { _abort, ...plain } = t;
+    fs.writeFileSync(taskFile(t.id), JSON.stringify(plain, null, 2), 'utf8');
+  } catch {}
+}
+
+function taskView(t) {
+  if (!t) return t;
+  const started = Date.parse(t.startedAt) || Date.now();
+  const o = { ...t };
+  o.elapsedSec = Math.max(0, Math.round(((t.finishedAt ? Date.parse(t.finishedAt) : Date.now()) - started) / 1000));
+  o.idleSec = t.lastTickAt ? Math.max(0, Math.round((Date.now() - t.lastTickAt) / 1000)) : 0;
+  o.canStop = t.state === 'running';
+  return o;
+}
 
 export function getCheckTask(id) {
-  if (tasks.has(id)) return tasks.get(id);
+  if (tasks.has(id)) return taskView(tasks.get(id));
   const f = taskFile(id);
-  if (fs.existsSync(f)) { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch {} }
+  if (fs.existsSync(f)) {
+    try {
+      const t = JSON.parse(fs.readFileSync(f, 'utf8'));
+      // v1.2.3 启动自愈：落盘里还是 running 但内存里没有 → 说明上次服务退出/崩了，不会再有人更新它
+      if (t && t.state === 'running') {
+        t.state = 'stalled';
+        t.message = '上次核查没跑完（工作台中途重启或转换卡住了）。点「重新核查」重跑一次。';
+        t.finishedAt = new Date().toISOString();
+        t.lastTickAt = 0;
+        try { fs.writeFileSync(f, JSON.stringify(t, null, 2), 'utf8'); } catch {}
+      }
+      return taskView(t);
+    } catch {}
+  }
   return null;
 }
 
 // v1.1.5：列出所有还在跑的核查任务（首页任务中心用）
 export function listCheckTasks() {
   const out = [];
-  tasks.forEach((t) => { if (t && t.state === 'running') out.push(t); });
+  tasks.forEach((t) => { if (t && t.state === 'running') out.push(taskView(t)); });
   return out;
+}
+
+// v1.2.3：启动自愈。上次服务退出/崩掉时，落盘里可能还留着 running 的任务，
+// 那些任务再也不会有人更新了，启动时统一标成「上次没跑完」，页面上就不会一直转圈。
+export function healStaleTasks() {
+  try {
+    if (!fs.existsSync(TASKS_DIR)) return 0;
+    let n = 0;
+    for (const name of fs.readdirSync(TASKS_DIR)) {
+      if (!name.endsWith('.json')) continue;
+      const fp = path.join(TASKS_DIR, name);
+      let t;
+      try { t = JSON.parse(fs.readFileSync(fp, 'utf8')); } catch { continue; }
+      if (!t || t.state !== 'running') continue;
+      t.state = 'stalled';
+      t.message = '上次核查没跑完（工作台中途重启或转换卡住了）。点「重新核查」重跑一次。';
+      t.finishedAt = new Date().toISOString();
+      t.lastTickAt = 0;
+      delete t._abort;
+      try { fs.writeFileSync(fp, JSON.stringify(t, null, 2), 'utf8'); n++; } catch {}
+    }
+    return n;
+  } catch { return 0; }
+}
+
+// v1.2.3：手动停止本次核查
+export function stopCheckTask(id) {
+  const t = tasks.get(id);
+  if (!t) return null;
+  if (t.state !== 'running') return taskView(t);
+  t.stopRequested = true;
+  t.message = '正在停止…（等当前这一步收尾）';
+  t.lastTickAt = Date.now();
+  persist(t);
+  try { if (t._abort) t._abort.abort(); } catch {}
+  return taskView(t);
 }
 
 function pickScoreDoc(results) {
@@ -485,45 +666,100 @@ function pickScoreDoc(results) {
 
 export function startCheckTask(project, sources, analysis) {
   ensureCheckDirs();
+  // 同项目已经在跑：只有在它还活着（3 分钟内有进展）时才复用它；
+  // 已经僵死的就标成 stalled，另外开一个新任务——这就是以前点「重新核查」没反应的原因。
   for (const t of tasks.values()) {
-    if (t.projectId === project.id && t.state === 'running') return t;
+    if (t.projectId !== project.id || t.state !== 'running') continue;
+    if (Date.now() - (t.lastTickAt || 0) < STALL_MS) return taskView(t);
+    t.state = 'stalled';
+    t.message = '上一次核查超过 3 分钟没有任何进展，判定为卡死，已经自动停下。下面是重新开的这一次。';
+    t.finishedAt = new Date().toISOString();
+    persist(t);
+    try { if (t._abort) t._abort.abort(); } catch {}
   }
+
   const aiOn = apiReady();
   const t = {
     id: uid('t_'),
     projectId: project.id,
     state: 'running',
+    stage: '准备',
     message: '准备开始核查…',
     progress: 0,
     total: sources.length,
+    docIndex: 0,
     ai: aiOn && !!analysis,
-    startedAt: nowIso()
+    startedAt: new Date().toISOString(),
+    lastTickAt: Date.now(),
+    stopRequested: false
   };
+  const ac = new AbortController();
+  t._abort = ac;
   tasks.set(t.id, t);
   persist(t);
 
-  const step = (msg) => { t.message = msg; persist(t); };
+  // 进度统一入口：任何一步只要动一下，就刷新最后活动时间，卡死判定不会被误触
+  const step = (msg, stage) => {
+    t.message = msg;
+    if (stage) t.stage = stage;
+    t.lastTickAt = Date.now();
+    persist(t);
+  };
+  const onProgress = (sec) => {
+    t.message = (t.stage || '转换') + '：Word 还在处理，已经等了 ' + sec + ' 秒…（超时会长提示，可以点「停止本次核查」）';
+    t.lastTickAt = Date.now();
+    persist(t);
+  };
+
+  // 看门狗：3 分钟没进展就自己判死，别让页面一直转圈
+  const watch = setInterval(() => {
+    if (t.state !== 'running') { clearInterval(watch); return; }
+    if (Date.now() - (t.lastTickAt || 0) >= STALL_MS) {
+      t.state = 'stalled';
+      t.message = '已经 3 分钟没有任何进展，判定卡死了（多半是 Word 转换卡住）。点「重新核查」重跑，或先到任务管理器结束 WINWORD。';
+      t.finishedAt = new Date().toISOString();
+      persist(t);
+      try { ac.abort(); } catch {}
+      clearInterval(watch);
+    }
+  }, WATCH_MS);
+  if (watch.unref) watch.unref();
 
   (async () => {
     const results = [];
+    const degradedDocs = [];
     try {
       for (let i = 0; i < sources.length; i++) {
+        if (ac.signal.aborted) throw Object.assign(new Error('已停止'), { code: 'STOPPED' });
         const src = sources[i];
-        step(`正在读取文件：${src.name}（${i + 1}/${sources.length}）`);
+        t.docIndex = i + 1;
         t.progress = i;
+        step('正在读取文件：' + src.name + '（' + (i + 1) + '/' + sources.length + '）', '读取文件');
         const one = { id: src.id, name: src.name, stage: src.stage, relPath: src.relPath, size: src.size };
         try {
-          const { pages, pageInfo, text } = await checkOneDoc(project, src, analysis);
+          const conv = await checkOneDoc(project, src, analysis, {
+            signal: ac.signal,
+            onProgress,
+            onStage: (m) => step(src.name + ' · ' + m, '读取文件')
+          });
+          const { pages, pageInfo, text } = conv;
+          one.degraded = conv.degraded || '';
+          if (one.degraded) degradedDocs.push(src.name);
           one.pages = pages.length;
-          one.checks = ruleCheck(pages, project, src, pageInfo);
           one.kind = docKindOf(src.name);
+
+          if (ac.signal.aborted) throw Object.assign(new Error('已停止'), { code: 'STOPPED' });
+          step(src.name + ' · 正在做格式与要素检查…', '格式检查');
+          one.checks = one.degraded ? textOnlyRuleCheck(pages, project, src) : ruleCheck(pages, project, src, pageInfo);
+          if (one.degraded) one.checksOmitted = ['空白页（需要真实排版）', '页码连续性（需要真实排版）', '封面正副本标注（需要真实排版）'];
           one.textChars = text.length;
           one._pages = pages;
 
           // ① 逐条对照招标文件要求核查
           if (aiOn && analysis && one.kind !== 'price') {
             try {
-              one.req = await aiRequirementCheck(project, analysis, pages, src.name, (m) => step(src.name + ' · ' + m));
+              step(src.name + ' · 准备逐条核对招标要求…', '逐条核对');
+              one.req = await aiRequirementCheck(project, analysis, pages, src.name, (m) => step(src.name + ' · ' + m, '逐条核对'));
             } catch (e) {
               one.reqError = '逐条核查没跑成功：' + (e && e.message ? e.message : e);
             }
@@ -536,17 +772,24 @@ export function startCheckTask(project, sources, analysis) {
           // 废标/★条款只做到「部分响应」（缺材料、缺签章）也单独提示，这一项交人工确认
           if (reqStat && reqStat.riskyFatal > 0) one.warn += 1;
         } catch (e) {
+          // 用户点了「停止本次核查」时，转换会被取消，错误码是 CONVERT_CANCELLED。
+          // 以前这里只认 STOPPED，取消就被当成「这份文件读不了」吞掉，
+          // 结果照样保存成一份「核查完成：全部通过」的假结论。现在取消一律往上抛。
+          if (e && (e.code === 'STOPPED' || e.code === 'CONVERT_CANCELLED' || t.stopRequested)) throw e;
           one.error = e.message;
         }
         results.push(one);
+        t.progress = i + 1;
+        t.lastTickAt = Date.now();
       }
 
       // ② 深度模拟评标（只对一份主要是投标文件的那份做）
-      if (aiOn && analysis) {
+      if (aiOn && analysis && !ac.signal.aborted) {
         const pick = pickScoreDoc(results);
         if (pick && pick._pages) {
           try {
-            pick.score = await aiDeepScore(project, analysis, pick._pages, pick.name, (m) => step(m));
+            step('正在按评分项逐项模拟评标…', '模拟评标');
+            pick.score = await aiDeepScore(project, analysis, pick._pages, pick.name, (m) => step(m, '模拟评标'));
           } catch (e) {
             pick.score = { error: '模拟评标没跑成功：' + (e && e.message ? e.message : e) };
           }
@@ -565,23 +808,33 @@ export function startCheckTask(project, sources, analysis) {
         aiUsed: aiOn && !!analysis,
         reqTotal: results.reduce((a, b) => a + (b.req && b.req.stat ? b.req.stat.total : 0), 0),
         verdict: fatal ? 'red' : warn ? 'amber' : 'green',
-        checkAt: nowIso()
+        checkAt: new Date().toISOString()
       };
       saveCheck(project.id, check);
 
       t.state = 'done';
+      t.stage = '完成';
       t.progress = sources.length;
       t.total = sources.length;
-      t.message = fatal ? `核查完成：${fatal} 个必须改的问题` : warn ? `核查完成：${warn} 处建议核对` : '核查完成：全部通过';
-      t.finishedAt = nowIso();
+      const base = fatal ? ('核查完成：' + fatal + ' 个必须改的问题') : warn ? ('核查完成：' + warn + ' 处建议核对') : '核查完成：全部通过';
+      t.message = degradedDocs.length
+        ? base + '（' + degradedDocs.length + ' 份文件 Word 转 PDF 失败，只做了文字类核查：空白页、页码、封面标注这三项没查，请人工补看）'
+        : base;
+      t.degradedDocs = degradedDocs;
+      t.finishedAt = new Date().toISOString();
+      t.lastTickAt = Date.now();
       persist(t);
     } catch (e) {
-      t.state = 'error';
-      t.message = e.message || '核查失败';
-      t.finishedAt = nowIso();
+      const stopped = e && (e.code === 'STOPPED' || e.code === 'CONVERT_CANCELLED' || t.stopRequested);
+      t.state = stopped ? 'stopped' : 'error';
+      t.message = stopped ? '已停止本次核查（没查完的没保存，随时可以重新核查）' : (e.message || '核查失败');
+      t.finishedAt = new Date().toISOString();
+      t.lastTickAt = Date.now();
       persist(t);
+    } finally {
+      clearInterval(watch);
     }
   })();
 
-  return t;
+  return taskView(t);
 }

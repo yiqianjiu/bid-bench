@@ -1,80 +1,75 @@
+// v1.2.3：AI 调用层。原来是写死连 DeepSeek，现在按「用途」从模型服务列表里挑一个可用的。
+// 每个用途（分析/核查/评标/撰写/知识卡/画像/看图）可以在设置里单独指定模型；
+// 没指定就用默认模型；默认也连不上就自动往后面找能用的那条。
 import { loadConfig } from './config.mjs';
+import { resolveProvider, rawChat, apiReady as providersReady, visionProviders } from './providers.mjs';
 
-export function apiReady() {
+export { apiReady } from './providers.mjs';
+
+// 按用途挑模型；挑不到时报一句人话
+function pick(purpose) {
+  const p = resolveProvider(purpose);
+  if (p) return p;
   const cfg = loadConfig();
-  return !!cfg.deepseekApiKey;
+  if (cfg.deepseekApiKey || (cfg.providers && cfg.providers.length)) {
+    throw new Error('模型服务都用不了：请到「设置 → 模型服务」里检查地址、Key 和模型名，点「测试连接」看看。');
+  }
+  throw new Error('还没有配置模型服务，请到「设置 → 模型服务」里填一个（DeepSeek 之类都行）。');
 }
 
-async function chatOnce(messages, opts, attempt) {
-  const cfg = loadConfig();
-  if (!cfg.deepseekApiKey) throw new Error('还没有填写 DeepSeek API Key，请到「设置」里填。');
-  const body = {
-    model: (opts && opts.model) || cfg.deepseekModel || 'deepseek-flash',
-    messages,
-    temperature: opts && opts.temperature !== undefined ? opts.temperature : 0.2,
-    max_tokens: (opts && opts.maxTokens) || 8000
-  };
-  // deepseek-flash 默认会先"想"很久（effort=high），对"照着原文抽 JSON"这类任务只会
-  // 把输出额度耗光导致正文被截断；统一用 none 低延迟输出。
-  body.reasoning_effort = (opts && opts.reasoningEffort) || 'none';
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), (opts && opts.timeoutMs) || 240000);
-  let resp;
-  try {
-    resp = await fetch((cfg.deepseekBaseUrl || 'https://api.deepseek.com').replace(/\/$/, '') + '/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.deepseekApiKey },
-      body: JSON.stringify(body),
-      signal: ctrl.signal
-    });
-  } catch (e) {
-    clearTimeout(timer);
-    throw new Error('连不上 DeepSeek（网络或代理问题）：' + (e && e.message ? e.message : e));
-  }
-  clearTimeout(timer);
-  const txt = await resp.text();
-  if (!resp.ok) {
-    let msg = txt.slice(0, 300);
-    try { const j = JSON.parse(txt); msg = j.error && j.error.message ? j.error.message : msg; } catch {}
-    if (resp.status === 401) msg = 'API Key 不正确或已失效（' + msg + '）';
-    if (resp.status === 402) msg = ' DeepSeek 账户余额不足（' + msg + '）';
-    throw new Error('DeepSeek 调用失败 [' + resp.status + ']：' + msg);
-  }
-  let data;
-  try { data = JSON.parse(txt); } catch { throw new Error('DeepSeek 返回了无法解析的内容'); }
-  const choice = (data.choices && data.choices[0]) || {};
-  const msgObj = choice.message || {};
-  let content = msgObj.content;
-  const reason = choice.finish_reason;
-  if (!content && msgObj.reasoning_content) content = msgObj.reasoning_content;
-  if (!content) {
-    if (reason === 'length') throw new Error('这次要读的内容太多，AI 输出被截断了（可以少选几页再试）');
-    throw new Error('DeepSeek 没有返回内容（' + (reason || '未知原因') + '），重试一次通常就好');
-  }
+async function chatOnce(messages, opts) {
+  const o = opts || {};
+  const p = o.provider || pick(o.purpose);
+  const content = await rawChat(p, messages, {
+    temperature: o.temperature !== undefined ? o.temperature : 0.2,
+    maxTokens: o.maxTokens || 8000,
+    timeoutMs: o.timeoutMs,
+    json: !!o.json,
+    // deepseek-flash 这类模型默认会先"想"很久，对「照原文抽 JSON」只会把额度耗光导致正文被截断
+    reasoningEffort: o.reasoningEffort || (p.kind === 'deepseek' ? 'none' : '')
+  });
+  o._provider = p;
   return content;
 }
 
-export async function chatMessages(messages, opts) { return chat(messages, opts); }
+export async function chatMessages(messages, opts) {
+  return chat(messages, opts);
+}
 
 async function chat(messages, opts) {
   // 大模型有时会先"想"很久、把输出额度耗光，导致正文为空；这里自动重试一次并放大额度。
   const first = { ...(opts || {}) };
   delete first.json;
   try {
-    return await chatOnce(messages, first, 1);
+    return await chatOnce(messages, first);
   } catch (e) {
     const msg = String(e && e.message ? e.message : e);
+
+    // 主模型挂了（超时/连不上/5xx/没有返回内容）时，如果还配了别的模型，自动换一个再试，
+    // 免得夜里跑长任务被一条挂掉的线路卡死。Key/余额/模型名这类错误换了也没用，不重试。
+    const hardFail = /API Key 不正确|没有权限|余额不足|地址或模型名不对|调用失败 \[4\d\d\]/i.test(msg);
+    const tryFailover = !first.noFailover && !hardFail;
+    if (tryFailover) {
+      const list = (await import('./providers.mjs')).seeUsable();
+      const triedId = first.provider ? first.provider.id : '';
+      for (const cand of list) {
+        if (cand.id === triedId) continue;
+        try {
+          return await chatOnce(messages, { ...first, provider: cand, noFailover: true });
+        } catch {}
+      }
+    }
+
     const retryable = /没有返回内容|输出被截断|无法解析/.test(msg);
     if (!retryable) throw e;
-    const bigger = { ...first, maxTokens: Math.min((first.maxTokens || 8000) * 2, 32000), temperature: 0.1 };
-    const out = await chatOnce(messages, bigger, 2);
+    const bigger = { ...first, maxTokens: Math.min((first.maxTokens || 8000) * 2, 32000), temperature: 0.1, noFailover: true };
+    const out = await chatOnce(messages, bigger);
     if (out) return out;
     throw e;
   }
 }
 
 // v1.2.0：把被截断的 JSON 尽量救回来 —— 从最后一个完整成员处截断，再补齐括号。
-// 读招标文件时一段 16 页的 JSON 经常超额度，能救回来就不用整段重跑。
 function repairJson(s) {
   const stack = [];
   let inStr = false, esc = false, lastSafe = -1;
@@ -94,7 +89,6 @@ function repairJson(s) {
   if (!stack.length) return null;
   if (lastSafe < 0) return null;
   const head = s.slice(0, lastSafe);
-  // 重算 head 结尾处的栈
   const st2 = [];
   let inS = false, es = false;
   for (let i = 0; i < head.length; i++) {
@@ -134,8 +128,7 @@ export async function callJson(system, user, opts) {
   try {
     return tryJson(content);
   } catch (e) {
-    // v1.2.0：JSON 没闭合，十有八九是输出额度被截断了。放大额度再来一次，
-    // 比让上层整段重跑省一半时间（原来一段 16 页要重试 2 次才失败）。
+    // JSON 没闭合，十有八九是输出额度被截断了。放大额度再来一次。
     const bigger = { ...base, maxTokens: Math.min((base.maxTokens || 8000) * 2, 32000), temperature: 0.1 };
     const out2 = await chat(
       [{ role: 'system', content: system }, { role: 'user', content: user }],
@@ -152,13 +145,25 @@ export async function callText(system, user, opts) {
   );
 }
 
-// 用图片让 AI 读扫描页
+// 用图片让 AI 读扫描页。v1.2.3：只挑「支持看图」的模型；
+// 一个都没有就返回 null，调用方（lib/text.mjs）走本机 OCR。
 export async function callVisionJson(system, instruction, images) {
+  const cfg = loadConfig();
+  const list = visionProviders();
+  let chosen = null;
+  if (cfg.purposes && cfg.purposes.vision) {
+    chosen = list.find((p) => p.id === cfg.purposes.vision) || null;
+  }
+  if (!chosen) chosen = list[0] || null;
+  if (!chosen) return null;
+
   const content = [{ type: 'text', text: instruction }];
   for (const img of images) {
     content.push({ type: 'image_url', image_url: { url: 'data:image/png;base64,' + img.toString('base64') } });
   }
-  const model = loadConfig().deepseekModel || 'deepseek-flash';
-  const out = await chat([{ role: 'system', content: system }, { role: 'user', content }], { json: true, model });
+  const out = await chat(
+    [{ role: 'system', content: system }, { role: 'user', content }],
+    { json: true, provider: chosen, purpose: 'vision', maxTokens: 4000, timeoutMs: 180000 }
+  );
   return tryJson(out);
 }

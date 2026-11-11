@@ -15,7 +15,11 @@
     session: null, busy: '', outDir: '',
     view: 'pdf',        // pdf | text
     pv: null,           // 版面预览数据 {pages:[{page,url,lines}], sig}
-    pvBusy: false
+    pvBusy: false,
+    zoom: 'fit',        // 版面预览缩放：'fit' 或 0.5/0.75/1/1.25/1.5/2（v1.2.4）
+    hd: false,          // 高清出图（每页图约大 80%，放大看不糊）（v1.2.4）
+    railOff: false,     // 配图栏是否收起（v1.2.4）
+    anchored: 0         // 已落位的配图张数（v1.2.4）
   };
 
   function toast(msg, bad) {
@@ -68,7 +72,63 @@
     box.scrollTop = box.scrollHeight;
   }
 
-  /* ---------------- 版面预览：左边是纸，右边是建议配图 ---------------- */
+  /* ---------------- 版面预览：左边是纸，右边是建议配图（v1.2.4 重排） ----------------
+   * 纸面宽度跟着窗口走：适应宽度时按可用宽度铺满（最多 900 逻辑像素），
+   * 也可以手动选 50%～200%。放大后横向滚动，Ctrl+滚轮也能缩放。
+   * 右侧配图栏只在真有配图时出现，随时能收起；比例和高清开关记在浏览器里。 */
+  const ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+  const PV_MEM = 'twb.pv.';                 // 记忆键前缀：缩放 / 高清 / 配图栏开关
+  const PV_MAXW = 900;                      // 适应宽度时的最大纸面宽（再宽就超出图片清晰度了）
+  const PV_SCALE = { 1.6: 1, 2.0: 1.25 };   // 后端出图倍率 ↔ 用户选的「高清」档
+
+  const mem = {
+    get(k, d) { try { const v = localStorage.getItem(PV_MEM + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+    set(k, v) { try { localStorage.setItem(PV_MEM + k, JSON.stringify(v)); } catch (e) {} }
+  };
+
+  function zoomVal() { return S.zoom == null ? 'fit' : String(S.zoom); }
+  function zoomIdx() { return ZOOMS.indexOf(Number(S.zoom)); }
+  function fitWidth() {
+    const box = $('#ipPages');
+    if (!box) return 620;
+    // 滚动区是 flex:1，配图栏出现时它自己会让位，这里只扣内边距。
+    // 只有「真的有图挂在右边」的那一页会自己缩窄（见 .pv-row.pv-has-side .pv-page），
+    // 不能为了少数几页把 29 页全压窄——那正是用户抱怨的「页面太小」。
+    // 扣掉 .pv-pages 左右内边距 12+12 与 .pv-canvas 左右 2+2，刚好不出横向滚动条
+    return Math.max(140, Math.min(PV_MAXW, box.clientWidth - 28));
+  }
+  // 把纸面宽度算出来写进 CSS 变量，所有页面（含配图栏宽度）跟着变
+  function applyZoom() {
+    const grid = $('#ipPv');
+    if (!grid) return;
+    const box = $('#ipPages');
+    const basis = fitWidth();
+    const w = S.zoom == null || S.zoom === 'fit' ? basis : Math.round(basis * Number(S.zoom) * 10) / 10;
+    grid.style.setProperty('--pv-w', Math.round(w) + 'px');
+    // 右边挂了图的那一页要自己让出侧列宽度，否则整行会横向溢出
+    const narrow = !!box && box.clientWidth < 700;
+    grid.classList.toggle('pv-narrow', narrow);
+    const wSide = narrow ? w : Math.max(300, Math.min(w, (box ? box.clientWidth : 900) - 28 - 332));
+    grid.style.setProperty('--pv-w-side', Math.round(wSide) + 'px');
+    const sel = $('#ipZoomSel');
+    if (sel && sel.value !== zoomVal()) sel.value = zoomVal();
+    const i = zoomIdx();
+    const out = $('#ipZoomOut'), inn = $('#ipZoomIn');
+    if (out) out.disabled = i >= 0 && i <= 0;
+    if (inn) inn.disabled = i === ZOOMS.length - 1;
+  }
+  function setZoom(v) {
+    S.zoom = v === 'fit' ? 'fit' : Number(v);
+    mem.set('zoom', S.zoom);
+    applyZoom();
+  }
+  function stepZoom(dir) {
+    const i = zoomIdx();
+    if (i < 0) return setZoom(dir > 0 ? 1 : 0.75);
+    const n = Math.max(0, Math.min(ZOOMS.length - 1, i + dir));
+    setZoom(ZOOMS[n]);
+  }
+
   function chartCardHtml(c) {
     let body;
     if (c.chartType === 'table' && c.table) {
@@ -94,17 +154,26 @@
       '</div></div>';
   }
 
+  // 每页右侧那一列只在真的有图挂上去时才出现；没有一张落位时整列都不存在（不再留白）
+  function toggleSides() {
+    document.querySelectorAll('.pv-row').forEach((row) => {
+      const side = row.querySelector('.pv-side');
+      if (!side) return;
+      const filled = side.children.length > 0;
+      side.style.display = filled ? '' : 'none';
+      row.classList.toggle('pv-has-side', filled);
+    });
+  }
+
   // 把每张图/表格挂到预览页里对应段落的位置（按 afterText 找那一行，换算成该页的百分比高度）
   function placeCharts() {
     const cs = (S.session && S.session.charts) || [];
     const pages = (S.pv && S.pv.pages) || [];
-    const extra = $('#ipRail');
-    if (extra) extra.innerHTML = '';
+    const rail = $('#ipRail');
     document.querySelectorAll('.pv-side').forEach((el) => { el.innerHTML = ''; });
-    if (!cs.length) {
-      if (extra) extra.innerHTML = '<div class="pv-rail-empty">这一稿暂时没有配图。<br>可以在左边说「加一张流程图 / 甘特图 / 人员配置表」，AI 判断该画什么。</div>';
-      return;
-    }
+    if (rail) { rail.innerHTML = ''; rail.hidden = true; }
+    if (!cs.length) { toggleSides(); renderPvBar(); return; }
+
     const detached = [];
     for (const c of cs) {
       const key = String(c.afterText || '').replace(/\s+/g, '');
@@ -126,12 +195,20 @@
       wrap.innerHTML = chartCardHtml(c);
       holder.appendChild(wrap);
     }
-    if (detached.length && extra) {
-      extra.innerHTML = '<div class="pv-rail-h">其余建议配图（位置未定，可自己摆）</div>' + detached.map(chartCardHtml).join('');
+    toggleSides();
+
+    // 没落位的图放到右侧配图栏；有落位的图但配图栏被收起时也提示还能展开
+    const anchored = cs.length - detached.length;
+    if (rail && detached.length) {
+      rail.hidden = S.railOff;
+      rail.innerHTML = '<div class="pv-rail-h">位置未定的配图（' + detached.length + ' 张，可自己摆）</div>' + detached.map(chartCardHtml).join('');
     }
+    S.anchored = anchored;
+    renderPvBar();
     bindChartActions();
   }
 
+  // 配图卡片上的四个按钮：改这张 / 复制 / 下载 / 不要这张（v1.2.4 重排时搬回来）
   function bindChartActions() {
     document.querySelectorAll('[data-redo]').forEach((el) => { el.onclick = () => redoChart(el.dataset.redo); });
     document.querySelectorAll('[data-drop]').forEach((el) => {
@@ -172,14 +249,37 @@
     });
   }
 
+  // 顶部工具条：页数 / 配图情况 / 配图栏开关
+  function renderPvBar() {
+    const pv = S.pv;
+    const cs = (S.session && S.session.charts) || [];
+    const anchored = S.anchored == null ? cs.length : S.anchored;
+    const detached = Math.max(0, cs.length - anchored);
+    const info = $('#ipPvInfo');
+    if (info) {
+      const bits = [];
+      if (pv && pv.total) bits.push('共 ' + pv.total + ' 页');
+      if (cs.length) bits.push('配图 ' + anchored + ' 张已落位' + (detached ? ' · ' + detached + ' 张位置未定' : ''));
+      info.textContent = bits.length ? bits.join(' · ') : '版面预览';
+    }
+    const btn = $('#ipRailBtn');
+    if (btn) {
+      btn.hidden = !detached;
+      btn.textContent = S.railOff ? '显示配图栏' : '收起配图栏';
+      btn.classList.toggle('primary', !S.railOff && detached > 0);
+    }
+    applyZoom();
+  }
+
   function renderPages() {
-    const box = $('#ipPages');
+    const box = $('#ipCanvas');
     const pv = S.pv;
     const empty = $('#ipPvEmpty');
     if (!pv || !pv.pages || !pv.pages.length) {
       box.innerHTML = '';
       empty.hidden = false;
       empty.innerHTML = S.pvBusy ? '正在把稿子排成 Word 版面，第一次大约要 10~30 秒…' : '还没有版面。点右上角「刷新版面」按当前稿子排一版。';
+      renderPvBar();
       return;
     }
     empty.hidden = true;
@@ -191,9 +291,10 @@
         '</div>' +
         '<div class="pv-side"></div>' +
       '</div>';
-    }).join('') + '<div class="pv-extra" id="ipRail"></div>';
+    }).join('');
     placeCharts();
   }
+
 
   async function renderPreview(force) {
     if (!S.session) return;
@@ -209,6 +310,7 @@
     try {
       const d = await api('POST', base + '/preview', {
         force: !!force,
+        hd: !!S.hd,
         text: $('#ipText').value || S.session.text || '',
         charts: S.session.charts || []
       });
@@ -252,7 +354,9 @@
     S.view = v;
     document.querySelectorAll('#ipViewSeg button').forEach((b) => b.classList.toggle('active', b.dataset.view === v));
     $('#ipPv').style.display = v === 'pdf' ? '' : 'none';
+    if ($('#ipPvBar')) $('#ipPvBar').style.display = v === 'pdf' ? '' : 'none';
     $('#ipText').style.display = v === 'text' ? '' : 'none';
+    if (v === 'pdf') applyZoom();
     if (v === 'pdf' && !S.pv) renderPreview(false);
     if (v === 'text') renderText();
   }
@@ -277,7 +381,7 @@
       S.session = d.session;
       S.outDir = d.outDir || '';
       if (!S.session) { toast('这个章节打不开', true); return; }
-      if (!d.apiReady) toast('还没配 DeepSeek API Key，AI 功能用不了（可以在工作台「设置」里填）', true);
+      if (!d.apiReady) toast('还没配置模型服务，AI 功能用不了（可以在工作台「设置」里填）', true);
       renderAll();
     } catch (e) { toast(e.message, true); }
   }
@@ -428,6 +532,55 @@
     mask.querySelector('[data-close]').onclick = () => mask.remove();
     mask.onclick = (ev) => { if (ev.target === mask) mask.remove(); };
   }
+
+  /* ---------------- 版面预览：缩放 / 高清 / 配图栏（v1.2.4） ---------------- */
+  S.zoom = mem.get('zoom', 'fit');
+  if (S.zoom !== 'fit' && ZOOMS.indexOf(Number(S.zoom)) < 0) S.zoom = 'fit';
+  S.hd = !!mem.get('hd', false);
+  S.railOff = !!mem.get('railOff', false);
+  if ($('#ipZoomSel')) $('#ipZoomSel').value = zoomVal();
+  if ($('#ipHd')) $('#ipHd').checked = S.hd;
+
+  if ($('#ipZoomOut')) $('#ipZoomOut').onclick = () => stepZoom(-1);
+  if ($('#ipZoomIn')) $('#ipZoomIn').onclick = () => stepZoom(1);
+  if ($('#ipZoomSel')) {
+    $('#ipZoomSel').onchange = (ev) => {
+      const v = ev.target.value;
+      setZoom(v === 'fit' ? 'fit' : Number(v));
+    };
+  }
+  if ($('#ipHd')) {
+    $('#ipHd').onchange = (ev) => {
+      S.hd = !!ev.target.checked;
+      mem.set('hd', S.hd);
+      // 清晰度变了要重新出一遍图，否则看到的是旧分辨率的图
+      S.pv = null;
+      renderPreview(true);
+    };
+  }
+  if ($('#ipRailBtn')) {
+    $('#ipRailBtn').onclick = () => {
+      S.railOff = !S.railOff;
+      mem.set('railOff', S.railOff);
+      const rail = $('#ipRail');
+      if (rail) rail.hidden = S.railOff || !rail.children.length;
+      // 配图栏一收一放，可用宽度变了，纸面要重算
+      renderPvBar();
+    };
+  }
+  // Ctrl+滚轮缩放：只在页面上滚，不缩放整个网页
+  if ($('#ipPages')) {
+    $('#ipPages').addEventListener('wheel', (ev) => {
+      if (!ev.ctrlKey) return;
+      ev.preventDefault();
+      stepZoom(ev.deltaY > 0 ? -1 : 1);
+    }, { passive: false });
+  }
+  let pvResizeTm = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(pvResizeTm);
+    pvResizeTm = setTimeout(() => { if (S.view === 'pdf') applyZoom(); }, 120);
+  });
 
   /* ---------------- 绑定 ---------------- */
   $('#ipSend').onclick = send;

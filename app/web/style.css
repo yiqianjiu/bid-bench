@@ -138,9 +138,11 @@ table.list tr:last-child td { border-bottom: none; }
 .txt-red { color: #b6242e; }
 .txt-amber { color: #96650c; }
 
-.btn.tiny { padding: 3px 9px; font-size: 12.5px; border-radius: 6px; }
+/* v1.2.1：.btn.tiny 原来在两处重复定义（这里和文件核查段），后者覆盖前者，导致按钮忽高忽低。
+   现在只保留这一处，全站小按钮统一：高 27px 左右、12px 字、5px 圆角。 */
+.btn.tiny { padding: 4px 9px; font-size: 12px; line-height: 1.5; border-radius: 5px; }
 /* v1.1.3：删除按钮统一实心红底白字，平时就看得清（原来只有 12px 浅红字+淡边框） */
-.btn.tiny.danger { background:#c53030; border-color:#c53030; color:#fff; font-size:13px; padding:4px 10px; }
+.btn.tiny.danger { background:#c53030; border-color:#c53030; color:#fff; font-size:12px; padding:4px 10px; }
 .btn.tiny.danger:hover { background:#a02323; border-color:#a02323; color:#fff; }
 
 /* 红线提醒条 */
@@ -187,9 +189,15 @@ label.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 1
 .df-ch-main{padding:11px 2px;cursor:pointer}
 .df-ch-main:hover .df-ch-t{color:#2f6fd0}
 .df-ch-t{font-size:14px;color:#232830;font-weight:500}
+/* v1.2.2：「编制」按钮跟在重要技术/重要商务标签后面，标题再长也不会把按钮行撑乱 */
+.df-ch-indep{vertical-align:middle;margin-left:6px}
+/* v1.2.2：上传卡片上写清楚现在是「合并一份」还是「分三份」 */
+.df-drop-hint{margin-top:10px;font-size:12.5px;line-height:1.7;color:#4a5568;background:#f5f8ff;border:1px dashed #c3d5ef;border-radius:6px;padding:8px 10px;text-align:left}
 .df-ch-s{font-size:12px;color:#8a9099;margin-top:3px;line-height:1.5}
 .df-ch-n{display:none}
-.df-ch-a{display:flex;gap:6px;padding:0 2px 10px;flex-wrap:wrap}
+/* v1.2.1：章节行的按钮统一右对齐、等高、等间距；放不下就整行换行，不再出现「忽长忽短」 */
+.df-ch-a{display:flex;gap:6px;row-gap:6px;padding:0 2px 10px;flex-wrap:wrap;justify-content:flex-end;align-items:center}
+.df-ch-a .btn.tiny{flex:none;white-space:nowrap}
 .df-panel{padding:4px 2px 16px}
 .df-panel-h{display:flex;align-items:center;gap:8px;font-size:13px;color:#3a4048;margin-bottom:8px;flex-wrap:wrap}
 .df-editor{width:100%;box-sizing:border-box;border:1px solid #dfe4ea;border-radius:6px;padding:10px 12px;font-size:14px;line-height:1.9;font-family:inherit;resize:vertical;color:#232830;background:#fff}
@@ -204,7 +212,6 @@ label.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 1
 .df-tbl textarea{width:100%;box-sizing:border-box;border:1px solid transparent;border-radius:4px;padding:5px 6px;font-size:13px;line-height:1.6;font-family:inherit;color:#2a2f36;background:#fff;resize:none;min-height:40px;overflow:hidden}
 .df-tbl textarea:hover{border-color:#e0e5ec}
 .df-tbl textarea:focus{outline:none;border-color:#2f6fd0;background:#fff}
-.btn.tiny{padding:4px 9px;font-size:12px;border-radius:5px}
 @media(max-width:1100px){.df-wrap{flex-direction:column}.df-docs{width:100%;flex:none}}
 
 /* ---------- 模块4：文件核查 ---------- */
@@ -294,6 +301,9 @@ label.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 1
 .arch-m { font-size:12.5px; color:#6b7280; margin-bottom:4px; }
 .arch-p { font-size:11px; color:#9aa1ab; word-break:break-all; margin-bottom:10px; line-height:1.5; }
 .arch-a { display:flex; justify-content:space-between; align-items:center; font-size:12px; }
+/* v1.2.1：同名同编号的重复归档，列表只显示最新一份，其余在这里列出（资料都还在） */
+.arch-dup { display:flex; flex-wrap:wrap; align-items:center; gap:6px; font-size:12px; margin:0 0 10px; padding:8px 10px; background:#fffdf5; border:1px solid #f0e2bd; border-radius:8px; }
+.arch-dup .btn.tiny { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 @media (max-width:1100px) {
   .ck-top, .sb-top { flex-direction:column; align-items:stretch; }
 }
@@ -356,6 +366,9 @@ label.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 1
 .ck-src-more summary:hover { color:#1a56db; }
 .ck-src-more .ck-src-list { margin-top:4px; }
 .tag-gray { background:#eef1f5; color:#5b6472; }
+/* v1.2.1：核查页里被自动排除的招标类文件 */
+.ck-src-ex { opacity:.72; cursor:default; }
+.ck-src-ex .ck-src-n { text-decoration:line-through; }
 
 /* ================= v1.1.0：章节性质标签 / 专家画像 / 知识库 ================= */
 .tag.role-tech { background: #e3efff; color: #1a56c4; border: 1px solid #b9d4ff; }
@@ -445,12 +458,16 @@ label.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 1
 .btn.indep { border-color: #7c9cd6; color: #2b6cb0; background: #f2f7ff; }
 .btn.indep:hover { background: #e6f0ff; }
 /* v1.1.3：章节行里只放两个字的紧凑按钮，不再占一整行 */
-.btn.tiny.indep { border-color:#c3d5ef; color:#2b6cb0; background:#fff; padding:3px 8px; font-size:12.5px; white-space:nowrap; }
+.btn.tiny.indep { border-color:#c3d5ef; color:#2b6cb0; background:#fff; padding:4px 9px; font-size:12px; white-space:nowrap; }
 .btn.tiny.indep:hover { background:#eef5ff; border-color:#7c9cd6; }
+/* v1.2.2 保护：万一以后又有人复用 .indep 做布局容器，按钮也不会被撑开 */
+.btn.indep { height:auto; display:inline-flex; flex-direction:row; align-items:center; }
 
 /* ---- 独立编制窗口 ---- */
 body.indep-body { background: #eef1f6; overflow: hidden; }
-.indep { display: flex; flex-direction: column; height: 100vh; }
+/* v1.2.2：原来这条叫 .indep，和章节行的「编制」按钮（.btn.tiny.indep）撞名，
+   按钮被套上 100vh 布局撑成 44×482，整行被顶到 492px。改成 .indep-page，各归各位。 */
+.indep-page { display: flex; flex-direction: column; height: 100vh; }
 .indep-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 10px 16px; background: #fff; border-bottom: 1px solid #dfe3ea;
@@ -549,26 +566,52 @@ body.indep-body { background: #eef1f6; overflow: hidden; }
 .seg button.active { background: #2f6fd0; color: #fff; font-weight: 600; }
 
 .indep-doc { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.pv-grid { flex: 1; min-height: 0; display: flex; overflow: hidden; }
-.pv-pages {
-  flex: 1; min-width: 0; overflow-y: auto; overflow-x: hidden; background: #eef1f6;
-  padding: 16px 12px 28px; display: flex; flex-direction: column; align-items: center; gap: 18px;
+/* v1.2.4：预览工具条（页数 / 配图栏 / 高清 / 缩放） */
+.pv-bar {
+  display: flex; align-items: center; gap: 10px; padding: 7px 12px;
+  border-bottom: 1px solid #eef0f4; background: #fff; flex-wrap: wrap; font-size: 12.5px;
 }
+.pv-bar-t { color: #8892a4; font-size: 12px; }
+.pv-bar-r { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pv-zoom { display: inline-flex; align-items: center; border: 1px solid #dfe4ec; border-radius: 7px; background: #fff; overflow: hidden; }
+.pv-zoom button { border: 0; background: #fff; padding: 4px 9px; font-size: 13px; line-height: 1.45; font-family: inherit; cursor: pointer; color: #4a5568; }
+.pv-zoom button:hover { background: #f3f7fd; }
+.pv-zoom button:disabled { color: #c3cad4; cursor: default; background: #fff; }
+.pv-zoom-sel { border: 0; border-left: 1px solid #dfe4ec; border-right: 1px solid #dfe4ec; padding: 4px 6px; font-size: 12.5px; font-family: inherit; background: #fff; color: #4a5568; cursor: pointer; }
+.pv-hd { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; color: #4a5568; white-space: nowrap; cursor: pointer; }
+.pv-hd input { width: 14px; height: 14px; }
+
+.pv-grid { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+/* 滚动容器：放大后可以左右拖，页面在画布居中 */
+.pv-pages { flex: 1; min-width: 0; overflow: auto; background: #eef1f6; padding: 16px 12px 28px; }
+.pv-canvas { display: flex; flex-direction: column; align-items: stretch; gap: 18px; min-width: min-content; padding: 0 2px; }
 /* 一页纸 + 右侧一列图，两列并排、一起滚动 */
-.pv-row { display: flex; gap: 12px; align-items: stretch; width: 100%; max-width: 1000px; justify-content: center; }
+.pv-row { display: flex; gap: 12px; align-items: stretch; flex: none; margin: 0 auto; }
 .pv-page {
-  position: relative; width: 100%; max-width: 620px; flex: 0 1 620px; background: #fff;
+  position: relative; width: var(--pv-w, 620px); flex: none; background: #fff;
   border: 1px solid #d8dee8; border-radius: 3px; box-shadow: 0 2px 8px rgba(20,32,56,.08);
 }
 .pv-page img { width: 100%; height: 100%; display: block; border-radius: 3px; object-fit: contain; }
 .pv-no { position: absolute; right: 8px; bottom: -16px; font-size: 11px; color: #8b95a5; }
 .pv-side { width: 320px; flex: none; position: relative; }
+/* 只有这一页右边真有图时才让纸窄一点，其余页保持满宽（v1.2.4） */
+.pv-row.pv-has-side .pv-page { width: var(--pv-w-side, var(--pv-w, 620px)); }
+/* 预览区太窄时，图改挂到纸下面，不再并排挤（v1.2.4） */
+.pv-narrow .pv-row { flex-wrap: wrap; }
+.pv-narrow .pv-side { width: 100%; min-height: 0; }
+.pv-narrow .pv-anchor { position: static; }
+.pv-narrow .pv-row.pv-has-side .pv-page { width: var(--pv-w, 620px); }
 .pv-anchor { position: absolute; left: 0; right: 0; }
 .pv-anchor .chart-card { width: 100%; background: #fff; box-shadow: 0 1px 4px rgba(20,32,56,.06); }
-.pv-extra { width: 100%; max-width: 1000px; display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
+.pv-rail { width: 340px; flex: none; overflow-y: auto; padding: 14px 12px 28px; border-left: 1px solid #e3e8f2; background: #fafbfd; display: flex; flex-direction: column; gap: 10px; }
+.pv-rail[hidden] { display: none; }
+/* 收起配图栏：每页右侧那列不再占位，纸面独占宽度 */
+.pv-hide-side .pv-side { display: none; }
+.pv-extra { width: 100%; display: flex; flex-direction: column; gap: 10px; }
 .pv-rail-h { font-size: 12.5px; color: #8892a4; padding: 6px 2px; }
+.pv-rail-empty { font-size: 12.5px; color: #8892a4; line-height: 1.9; padding: 10px 2px; }
 .pv-empty { padding: 40px 20px; text-align: center; color: #8892a4; font-size: 13.5px; line-height: 2; }
-@media (max-width: 1180px) {
+@media (max-width: 1240px) {
   .pv-row { flex-wrap: wrap; }
   .pv-side { width: 100%; min-height: 0; }
   .pv-anchor { position: static; }
@@ -665,8 +708,10 @@ body.indep-body { background: #eef1f6; overflow: hidden; }
 
 
 /* ===== v1.1.5：侧栏「回到首页」===== */
-.btn.home { background: #f3f7ff; border-color: #d7e3fb; color: #23508f; font-weight: 600; }
-.btn.home:hover { background: #e8f0ff; }
+/* v1.2.1：原来叫 .btn.home，被首页容器的 .home（max-width:940px + padding:56px 24px 40px）连带套用，
+   按钮被撑成 243×117。改名 .homebtn 后与「专家知识库」「＋新建项目」完全同尺寸。 */
+.btn.homebtn { background: #f3f7ff; border-color: #d7e3fb; color: #23508f; font-weight: 600; }
+.btn.homebtn:hover { background: #e8f0ff; }
 
 /* ===== v1.1.5：全局任务条（侧栏）===== */
 .task-bar { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 2px; }
@@ -705,3 +750,36 @@ body.indep-body { background: #eef1f6; overflow: hidden; }
 .kbc-tags { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 5px; }
 .kbc-tags span { font-size: 11px; padding: 1px 7px; border-radius: 20px; background: #eef3fb; color: #5b6b82; }
 .kbc-a { margin-top: 8px; display: flex; gap: 6px; justify-content: flex-end; }
+
+/* ---------- v1.2.3：设置页「模型服务」 ---------- */
+.set-sec { border-top: 1px solid var(--line); padding: 16px 0 4px; }
+.set-sec:first-of-type { border-top: 0; padding-top: 4px; }
+.set-h { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.set-h b { font-size: 14.5px; }
+.set-sub { font-size: 12.5px; color: var(--muted); line-height: 1.6; }
+.set-hint { font-size: 12px; color: var(--muted); }
+/* v1.2.4：原来这套类叫 pv-*，和独立编制「版面预览」的 .pv-grid / .pv-empty 撞名，
+   后定义的规则把预览页压成了两列（右边那列就是一块空白）。统一改成 prov-* 前缀。 */
+.prov-item { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; background: #fcfdff; }
+.prov-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.prov-name { flex: 1 1 160px; min-width: 120px; border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px; font-weight: 600; font-size: 13.5px; }
+.prov-kind, .prov-sel { border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px; font-size: 13px; background: #fff; }
+.prov-on { display: flex; align-items: center; gap: 5px; font-size: 12.5px; color: #4a5058; white-space: nowrap; }
+.prov-on input { width: 15px; height: 15px; }
+.prov-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; }
+.prov-grid .field input { font-size: 13px; }
+.prov-res { font-size: 12.5px; margin-top: 8px; line-height: 1.6; }
+.prov-res.ok { color: #1a7f37; }
+.prov-res.err { color: #c0272d; }
+.prov-add { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.prov-empty { font-size: 13px; color: var(--muted); padding: 10px 2px; }
+.modal { max-width: 960px; }
+
+/* ---------- v1.2.3：核查进度 ---------- */
+.ck-prog { border: 1px solid #dbe6f5; background: #f6faff; border-radius: 10px; padding: 14px 16px; }
+.ck-prog .ckp-t { font-weight: 600; margin-bottom: 6px; }
+.ck-prog .ckp-m { font-size: 13.5px; color: #3b4350; line-height: 1.7; }
+.ck-prog .ckp-f { font-size: 12.5px; color: #8b93a1; margin-top: 6px; }
+.ck-prog .ckp-b { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.ck-deg { border: 1px solid #f0d5a8; background: #fffaf0; border-radius: 10px; padding: 12px 14px; margin: 12px 0; font-size: 13px; color: #6b5732; line-height: 1.7; }
+.ck-deg b { color: #8a5a00; }
