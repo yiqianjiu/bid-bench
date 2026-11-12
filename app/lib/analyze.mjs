@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { detectOcr } from './ocr.mjs';
 import path from 'node:path';
-import { DATA_DIR, ROOT } from './config.mjs';
+import { DATA_DIR, ROOT, ARCHIVE_DIR } from './config.mjs';
 import { all, get, run, addEvent } from './db.mjs';
 import { ensureText, ocrPages, writeTextCache } from './text.mjs';
 import { callJson, apiReady } from './ai.mjs';
@@ -63,6 +63,28 @@ export function listActiveTasks() {
   const out = [];
   tasks.forEach((t) => { if (t && t.state === 'running') out.push(t); });
   return out;
+}
+
+// v1.2.5：请求停止一个正在跑的分析任务。
+// 只是打一个标记，真正的退出发生在 runAnalysis 的检查点里（每个分段开头、每次重试前、评分表补跑前）。
+export function stopAnalysisTask(taskId) {
+  const t = tasks.get(taskId) || getTask(taskId);
+  if (!t) return false;
+  if (t.state !== 'running') return false;
+  t.stopRequested = true;
+  t.message = '正在停止…';
+  persistTask(t);
+  // 内存里的那份也要打上（getTask 可能返回的是从磁盘读出来的副本）
+  const live = tasks.get(t.taskId);
+  if (live && live !== t) { live.stopRequested = true; live.message = '正在停止…'; }
+  return true;
+}
+
+// 检查点：被要求停止就立刻抛出去，由 startAnalysis 的 catch 收尾
+function checkStop(task) {
+  if (task && task.stopRequested) {
+    throw Object.assign(new Error('已按要求停止'), { code: 'STOPPED' });
+  }
 }
 
 // ---------- 工具 ----------
@@ -152,6 +174,7 @@ export function startAnalysis(db, projectId, opts) {
     truncated: false,
     error: '',
     errorCode: '',
+    stopRequested: false,
     startedAt: nowIso(),
     finishedAt: ''
   };
@@ -160,10 +183,19 @@ export function startAnalysis(db, projectId, opts) {
   persistTask(task);
 
   runAnalysis(db, p, task, opts || {}).catch((e) => {
-    task.state = 'failed';
-    task.errorCode = (e && e.code) || '';
-    task.error = String((e && e.message) || e);
-    task.message = '分析失败：' + task.error;
+    const code = (e && e.code) || '';
+    if (code === 'STOPPED') {
+      // v1.2.5：用户主动停止，不是失败。不给报错信息，免得界面上冒出红字。
+      task.state = 'stopped';
+      task.errorCode = 'STOPPED';
+      task.error = '';
+      task.message = '已停止';
+    } else {
+      task.state = 'failed';
+      task.errorCode = code;
+      task.error = String((e && e.message) || e);
+      task.message = '分析失败：' + task.error;
+    }
     task.finishedAt = nowIso();
     persistTask(task);
     runningByProject.delete(projectId);
@@ -185,6 +217,23 @@ function segmentPages(pageCount) {
   return segs;
 }
 
+// v1.2.5：把「项目/<dir>/<阶段>/<文件>」换算成「归档/<relDir>/<阶段>/<文件>」，找不到返回空
+function archivePathOf(project, f) {
+  try {
+    const relDir = (() => {
+      const note = String((project && project.archiveNote) || '');
+      const i = note.indexOf('||');
+      return (i >= 0 ? note.slice(i + 2) : '').trim();
+    })();
+    if (!relDir) return '';
+    const rel = String((f && f.relPath) || '').replace(/\\/g, '/');
+    const parts = rel.split('/').filter(Boolean);
+    if (parts.length < 4 || parts[0] !== '项目') return '';
+    const dst = path.join(ARCHIVE_DIR, relDir, ...parts.slice(2));
+    return fs.existsSync(dst) ? dst : '';
+  } catch (e) { return ''; }
+}
+
 async function runAnalysis(db, p, task, opts) {
   ensureAnalysisDirs();
   const local = detectOcr();
@@ -194,7 +243,12 @@ async function runAnalysis(db, p, task, opts) {
   if (opts.fileId) f = get(db, 'SELECT * FROM files WHERE id = ? AND projectId = ?', opts.fileId, p.id);
   if (!f) f = get(db, "SELECT * FROM files WHERE projectId = ? AND stage = 'tender' AND (role = 'tenderFile' OR role = 'fromArchive') ORDER BY (role = 'tenderFile') DESC, uploadedAt ASC LIMIT 1", p.id);
   if (!f) throw new Error('还没有上传招标文件，请先到「招标文件」页签上传');
-  const filePath = path.join(ROOT, f.relPath);
+  let filePath = path.join(ROOT, f.relPath);
+  // v1.2.5：项目关闭归档后 项目/ 下的原件已清空，这里回落到 归档/ 里找同一份文件
+  if (!fs.existsSync(filePath)) {
+    const alt = archivePathOf(p, f);
+    if (alt) filePath = alt;
+  }
   if (!fs.existsSync(filePath)) throw new Error('招标文件已不在磁盘：' + f.originalName);
 
   task.message = '正在读取文件文字…';
@@ -202,6 +256,7 @@ async function runAnalysis(db, p, task, opts) {
 
   let cache = await ensureText(f, filePath);
   run(db, 'UPDATE files SET pages = ?, textChars = ?, extracted = 1 WHERE id = ?', cache.pageCount, cache.chars, f.id);
+  checkStop(task); // 读文件阶段（大文件可能很慢）结束后也检查一次
 
   // 页数兜底：老缓存可能已损坏（pageCount=0 但 pages 有内容）
   if (!cache.pageCount && cache.pages && cache.pages.length) cache.pageCount = cache.pages.length;
@@ -247,6 +302,7 @@ async function runAnalysis(db, p, task, opts) {
   const byKey = new Map(merged.map((s) => [s.key, s]));
 
   for (let i = 0; i < segs.length; i++) {
+    checkStop(task); // v1.2.5：每读一段之前先看看是不是被叫停了
     const [a, b] = segs[i];
     task.segIndex = i + 1;
     task.step = i;
@@ -263,6 +319,7 @@ async function runAnalysis(db, p, task, opts) {
     let out = null;
     let lastErr = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
+      checkStop(task); // 重试之间也要能停下来
       try {
         const segCand = {
           strong: fatalCand.strong.filter((s) => s.page >= a && s.page <= b),
@@ -369,6 +426,7 @@ async function runAnalysis(db, p, task, opts) {
       }
     }
   } catch (e) {
+    if (e && e.code === 'STOPPED') throw e; // 停止请求要一路抛上去，不能当成「评分表补跑失败」
     task.failedSegments.push({ from: 0, to: 0, error: '评分表补跑失败：' + String((e && e.message) || e) });
   }
 

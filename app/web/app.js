@@ -1497,6 +1497,17 @@ async function bfRun() {
       showBackfillFailed(t, res);
       return;
     }
+    // v1.2.5：用户点了停止，后台已经退出并把半成品清掉了
+    if (t.state === 'stopped') {
+      BF.busy = false;
+      setModalLock(false);
+      closeModal(true);
+      BF = null;
+      goHome();
+      await refreshProjects();
+      toast('已停止，补录项目已删除');
+      return;
+    }
     setTimeout(tick, 1500);
   };
   setTimeout(tick, 800);
@@ -1510,11 +1521,27 @@ function confirmStopBackfill() {
     '<button class="btn danger" id="bfStop">确定停止</button></div>', { lock: false });
   $('#bfKeep').onclick = () => { closeModal(true); backfillDialogAgain(); };
   $('#bfStop').onclick = async () => {
-    const pid = BF && BF.projectId;
-    BF = null;
+    // v1.2.5：先真的让后台停下来，再等它自己清理。
+    // 以前这里只是把项目删了就完事，后台那串步骤还在跑，任务条一直挂着。
+    const taskId = BF && BF.taskId;
+    if (BF) { BF.busy = true; BF.taskId = ''; }   // 让正在轮询的 tick 自己退出
     closeModal(true);
-    if (pid) { try { await api('DELETE', '/api/projects/' + pid); } catch {} }
-    toast('已停止，补录项目已删除');
+    setModalLock(false);
+    if (taskId) {
+      try { await api('POST', '/api/backfill/' + taskId + '/stop'); } catch (e) {}
+    }
+    toast('正在停止…');
+    // 等后台收尾（正常一两秒内就停），最多等 20 秒
+    let st = '';
+    for (let i = 0; i < 40 && taskId; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      let t = null;
+      try { t = await api('GET', '/api/backfill/' + taskId); } catch (e) { t = null; }
+      st = (t && t.state) || '';
+      if (st && st !== 'running') break;
+    }
+    BF = null;
+    toast(st === 'running' ? '已发送停止请求，后台正在收尾' : '已停止，补录项目已删除');
     goHome();
     await refreshProjects();
   };
@@ -3228,6 +3255,18 @@ function abandonDialog(st) {
   };
 }
 
+// v1.2.5：归档后项目文件夹里的原件会被清空（归档成为唯一副本），这里明确告诉用户
+function clearedLine(r) {
+  const c = r && r.cleared;
+  if (!c) return '';
+  if (c.ok) {
+    return '<div class="card" style="background:#f7f9fc;margin-top:8px"><b>项目文件夹已经腾空</b>' +
+      '<br><span class="muted" style="font-size:13px">「我的项目」里这个项目的文件夹现在是空的，文件都收在上面的归档文件夹里（唯一一份，请不要再单独删归档文件夹）。以后要接着改这个项目，点「重新打开」会自动把文件复制回来。</span></div>';
+  }
+  return '<div class="card" style="background:#fff8e6;border-color:#f0d9a0;margin-top:8px"><b>项目文件夹暂时没清空</b>' +
+    '<br><span class="muted" style="font-size:13px">归档核对没完全对上（' + esc(c.reason || '原因不明') + '），为保险起见项目文件夹里的原件先留着了。归档文件夹是完整可用的，可以放心用。</span></div>';
+}
+
 function showArchivedDialog(r) {
   const ks = r.knowledgeSummary;
   const kbLine = ks
@@ -3243,6 +3282,7 @@ function showArchivedDialog(r) {
   openModal('<h3>已归档</h3><p>项目已关闭，全部资料已归档到：</p>' +
     '<div class="card" style="background:#f7f9fc"><code style="font-size:13px">' + esc(r.dir) + '</code></div>' +
     '<p class="muted" style="font-size:13px">共 ' + r.files + ' 个文件。以后要在别的标书里复用，直接去这个文件夹找。</p>' +
+    clearedLine(r) +
     kbLine +
     '<div class="modal-foot"><button class="btn primary" data-close>知道了</button></div>');
 }
@@ -3356,12 +3396,14 @@ function deleteArchivedProject(pid, name, dirPath) {
 function reopenProject(pid) {
   openModal('<h3>重新打开这个项目？</h3>' +
     '<p>项目会回到「我的项目」里，可以继续编辑。<b>归档文件夹和知识库记录都会保留</b>，不会删掉。</p>' +
-    '<p class="muted" style="font-size:13px">重新打开后如果又关闭一次，会再归档一份（以新的为准）。</p>' +
+    '<p class="muted" style="font-size:13px">文件会自动从归档文件夹复制回项目文件夹。重新打开后如果又关闭一次，会再归档一份（以新的为准）。</p>' +
     '<div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="okReopen">重新打开</button></div>');
   $('#okReopen').onclick = async () => {
     try {
-      await api('POST', '/api/projects/' + pid + '/reopen', {});
-      closeModal(); toast('已重新打开');
+      const r = await api('POST', '/api/projects/' + pid + '/reopen', {});
+      closeModal();
+      const rf = r && r.restored && r.restored.files;
+      toast(rf ? '已重新打开，从归档恢复了 ' + rf + ' 个文件' : '已重新打开');
       await refreshProjects();
       await openProject(pid, true);
     } catch (e) { toast(e.message, true); }

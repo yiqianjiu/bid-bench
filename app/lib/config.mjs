@@ -26,7 +26,7 @@ export const DEFAULT_CONFIG = {
   autoExitOnClose: true,
   // v1.2.3：Word 转 PDF 最长等多久（秒）。超大标书要几分钟，超过就停下并降级为文字类核查
   convertTimeoutSec: 480,
-  version: '1.2.4'
+  version: '1.2.5'
 };
 
 export function ensureDirs() {

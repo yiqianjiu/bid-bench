@@ -11,7 +11,7 @@ import { ensureText, readTextCache, ocrPages, buildFullText, ensureTextDirs, out
 import { callJson, apiReady } from './lib/ai.mjs';
 import { PRESETS, PURPOSES, getProviders, saveProviders, getPurposes, savePurposes, providerSummary, testProviderOp, visionProviders, migrateProviders, rawChat } from './lib/providers.mjs';
 import { SYSTEM_META, metaUserPrompt, SECTIONS } from './lib/prompt.mjs';
-import { startAnalysis, getTask, loadAnalysis, saveAnalysis, runningTaskOf, ensureAnalysisDirs, listActiveTasks } from './lib/analyze.mjs';
+import { startAnalysis, getTask, loadAnalysis, saveAnalysis, runningTaskOf, ensureAnalysisDirs, listActiveTasks, stopAnalysisTask } from './lib/analyze.mjs';
 import { exportAnalysisDocx } from './lib/exportAnalysis.mjs';
 import { ensureDraft, saveDraft, loadDraft, setMode, makeDoc, refreshTables, startOutlineTask, startChapterTask, getDraftTask, listDraftTasks, DOC_META, ensureDraftDirs, applyUploadedOutline, restoreAutoOutline, reviewRoles, setChapterRole } from './lib/draft.mjs';
 import { generateProfile, getProfile, confirmProfile, loadProfiles, profileHeadline, blankProfile, PROFILE_KINDS, KIND_LABEL } from './lib/profile.mjs';
@@ -24,7 +24,7 @@ import { stopCheckTask, loadCheck, saveCheck, listSources, startCheckTask, getCh
 import { exportCheckDocx } from './lib/exportCheck.mjs';
 import { GROUPS, ensureSubmit, rebuildSubmit, saveSubmit, loadSubmit, ensureSubmitDirs } from './lib/submit.mjs';
 import { exportSubmitDocx } from './lib/exportSubmit.mjs';
-import { archiveProject, listArchives, rebuildKnowledgeFor, archiveRelDirOf } from './lib/archive.mjs';
+import { archiveProject, listArchives, rebuildKnowledgeFor, archiveRelDirOf, restoreProjectFiles, verifyArchiveCopy, STAGE_SUBS } from './lib/archive.mjs';
 import { ensureProcDirs, appendProcess, loadProcess, copyProcessTo, pruneData } from './lib/process.mjs';
 import { ensureIndepDirs, ensureSession, loadSession, saveSession, listSessions, generateDraft, chatWithAI, applyUpdate, exportDraftWord, writeBack, defaultOutDir, redoChart, reworkChart, envCheck, clientSession, redoAllCharts, renderPreview, loadPreview, previewPageFile, chartDocx } from './lib/indep.mjs';
 import { browserStatus } from './lib/chart.mjs';
@@ -78,7 +78,30 @@ async function readJson(req) {
 }
 
 function projectDirOf(p) { return path.join(PROJECT_DIR, p.dir); }
-function fileAbs(f) { return path.join(ROOT, f.relPath); }
+
+// v1.2.5：把「项目/<项目目录>/<阶段>/<其余>」换算成「归档/<年份>/<归档文件夹>/<阶段>/<其余>」
+function archiveAbsOfRel(rel) {
+  try {
+    const s = String(rel || '').replace(/\\/g, '/');
+    const parts = s.split('/').filter(Boolean);
+    if (parts.length < 4 || parts[0] !== '项目') return '';
+    const pj = get(db, 'SELECT * FROM projects WHERE dir = ?', parts[1]);
+    if (!pj) return '';
+    const relDir = archiveRelDirOf(pj);
+    if (!relDir) return '';
+    return path.join(ARCHIVE_DIR, relDir, ...parts.slice(2));
+  } catch (e) { return ''; }
+}
+
+// 项目关闭归档后，01~05 的原件只留在 归档/ 里一份；项目目录里找不到时自动去归档里找，
+// 这样已归档项目在网页上照样能看、能预览、能下载。
+function fileAbs(f) {
+  const abs = path.join(ROOT, f.relPath);
+  if (fs.existsSync(abs)) return abs;
+  const alt = archiveAbsOfRel(f.relPath);
+  if (alt && fs.existsSync(alt)) return alt;
+  return abs;
+}
 
 // v1.2.1：导入投标文件时，工作台会在 03制作 下留一份原件副本（文件名 导入_<类型>_<时间戳>_<原名>）。
 // 反复导入同一个文件会留下很多份几十 MB 的副本（实测一个项目堆到 400MB+）。
@@ -800,7 +823,12 @@ route('POST', '/api/projects/:id/analysis/export', async (req, res, ctx) => {
 route('GET', '/api/download', async (req, res, ctx) => {
   const rel = ctx.query.path || '';
   if (!rel || rel.includes('..')) return json(res, 400, { error: '路径不合法' });
-  const abs = path.join(ROOT, rel);
+  let abs = path.join(ROOT, rel);
+  // v1.2.5：已归档项目，项目目录里已经清空，改从 归档/ 里取
+  if (!fs.existsSync(abs)) {
+    const alt = archiveAbsOfRel(rel);
+    if (alt && fs.existsSync(alt)) abs = alt;
+  }
   if (!fs.existsSync(abs)) return json(res, 404, { error: '文件不存在' });
   res.writeHead(200, {
     'Content-Type': MIME[path.extname(abs).toLowerCase()] || 'application/octet-stream',
@@ -1020,13 +1048,22 @@ const backfillTasks = new Map();
 function bfTaskOf(id) {
   const t = backfillTasks.get(id);
   if (!t) return null;
-  return { id: t.id, projectId: t.projectId, state: t.state, step: t.step, steps: t.steps, message: t.message, error: t.error, result: t.result, cleaned: t.cleaned || null, startedAt: t.startedAt, finishedAt: t.finishedAt };
+  return { id: t.id, projectId: t.projectId, state: t.state, step: t.step, steps: t.steps, message: t.message, error: t.error, result: t.result, cleaned: t.cleaned || null, stopRequested: !!t.stopRequested, startedAt: t.startedAt, finishedAt: t.finishedAt };
 }
 
 function bfSet(t, step, message) {
   t.step = step;
   t.message = message;
   t.updatedAt = nowIso();
+}
+
+// v1.2.5：补录任务的停止检查点。被叫停就把当前在跑的分析任务也一起叫停，然后抛出去。
+function bfCheckStop(t) {
+  if (!t || !t.stopRequested) return;
+  if (t.analysisTaskId) {
+    try { stopAnalysisTask(t.analysisTaskId); } catch {}
+  }
+  throw Object.assign(new Error('已按要求停止'), { code: 'STOPPED' });
 }
 
 route('POST', '/api/backfill', async (req, res) => {
@@ -1050,7 +1087,7 @@ route('POST', '/api/backfill', async (req, res) => {
     // v1.2.1：补录原来只到「判断章节性质」就归档，从来没生成画像，导致补录项目归档后知识库里没有专家画像。
     // 现在插一步「生成专家画像」，在判断章节性质之后、关闭归档之前跑。
     steps: ['读招标文件', '识别基本信息', '分析关键信息', '整理投标文件', '判断章节性质', '生成专家画像', '关闭归档'],
-    message: '正在准备…', error: '', result: null,
+    message: '正在准备…', error: '', result: null, stopRequested: false, analysisTaskId: '',
     startedAt: nowIso(), finishedAt: ''
   };
   backfillTasks.set(id, t);
@@ -1059,6 +1096,7 @@ route('POST', '/api/backfill', async (req, res) => {
   (async () => {
     try {
       // 1) 用已经建好的补录项目（文件已经传到它自己的目录里）
+      bfCheckStop(t);
       bfSet(t, 0, '正在准备项目…');
       const pid = pid0;
       const dir = proj0.dir;
@@ -1126,8 +1164,14 @@ route('POST', '/api/backfill', async (req, res) => {
       if (apiReady()) {
         try {
           const task = startAnalysis(db, pid, {});
+          t.analysisTaskId = task.taskId; // v1.2.5：记住它，停止补录时要一起叫停
           const deadline = Date.now() + 20 * 60 * 1000;
           while (Date.now() < deadline) {
+            // v1.2.5：等待分析的时间里也要能停 —— 先叫停分析任务，再抛出去让补录整体收尾
+            if (t.stopRequested) {
+              try { stopAnalysisTask(task.taskId); } catch {}
+              throw Object.assign(new Error('已按要求停止'), { code: 'STOPPED' });
+            }
             const cur = getTask(task.taskId);
             if (!cur) break;
             // v1.1.5：partial（部分段落没跑通）也算分析结束，不能再等下去
@@ -1139,6 +1183,7 @@ route('POST', '/api/backfill', async (req, res) => {
               break;
             }
             if (cur.state === 'failed') { analysisErr = cur.error || '分析失败'; break; }
+            if (cur.state === 'stopped') { throw Object.assign(new Error('已按要求停止'), { code: 'STOPPED' }); }
             bfSet(t, 2, '正在分析招标文件…' + (cur.message ? '（' + cur.message + '）' : ''));
             await new Promise((r) => setTimeout(r, 2500));
           }
@@ -1150,6 +1195,7 @@ route('POST', '/api/backfill', async (req, res) => {
       }
 
       // 5) 整理投标文件：几份就收几份，自动判断各是哪一份
+      bfCheckStop(t);
       bfSet(t, 3, '正在整理投标文件…');
       const d = ensureDraft(pid);
       d.mode = bidMoved.length > 1 ? 'split' : 'merged';
@@ -1192,10 +1238,12 @@ route('POST', '/api/backfill', async (req, res) => {
       saveDraft(pid, d);
 
       // 6) 判章节性质（重要技术 / 重要商务），归档时才挑得对
+      bfCheckStop(t);
       bfSet(t, 4, '正在判断哪些章节是重要内容…');
       let roleErr = '';
       if (apiReady()) {
         for (const key of Object.keys(d.docs || {})) {
+          bfCheckStop(t);
           const doc = d.docs[key];
           if (!doc || !(doc.chapters || []).length) continue;
           try { await reviewRoles(doc, { fallback: true }); } catch (e) { roleErr = String(e && e.message || e); }
@@ -1206,6 +1254,7 @@ route('POST', '/api/backfill', async (req, res) => {
       }
 
       // 6.5) 生成专家画像（技术 + 商务），自动确认存盘 —— 补录项目也要进知识库的画像
+      bfCheckStop(t);
       bfSet(t, 5, '正在生成专家画像…');
       let profileErr = '';
       const profileDone = { tech: false, biz: false };
@@ -1215,6 +1264,7 @@ route('POST', '/api/backfill', async (req, res) => {
           profileErr = '没有招标分析结果，跳过画像';
         } else {
           for (const kind of ['tech', 'biz']) {
+            bfCheckStop(t);
             bfSet(t, 5, '正在生成' + (kind === 'tech' ? '技术' : '商务') + '专家画像…');
             try {
               const refs = findSimilar(get(db, 'SELECT * FROM projects WHERE id = ?', pid), kind, 3);
@@ -1232,9 +1282,10 @@ route('POST', '/api/backfill', async (req, res) => {
       }
 
       // 7) 关闭归档 + 进知识库
+      bfCheckStop(t);
       bfSet(t, 6, '正在归档…');
       const proj = get(db, 'SELECT * FROM projects WHERE id = ?', pid);
-      const ar = archiveProject(proj, db, { note: '项目补录自动归档', sessions: listSessions(pid) });
+      const ar = archiveProject(proj, db, { note: '项目补录自动归档', sessions: listSessions(pid), clearProject: true });
       run(db, 'UPDATE projects SET status = ?, closedAt = ?, archiveNote = ?, closedBy = ?, updatedAt = ? WHERE id = ?',
         'archived', nowIso(), '项目补录自动归档||' + ar.relDir, 'backfill', nowIso(), pid);
       addEvent(db, pid, 'archive', '补录归档到 ' + ar.relDir);
@@ -1264,19 +1315,25 @@ route('POST', '/api/backfill', async (req, res) => {
         cardTaskId: bfCardTaskId
       };
     } catch (e) {
-      t.state = 'failed';
-      t.error = String(e && e.message || e);
-      t.message = '补录失败：' + t.error;
+      const stopped = !!(e && e.code === 'STOPPED');
+      t.state = stopped ? 'stopped' : 'failed';
+      t.error = stopped ? '' : String(e && e.message || e);
+      t.message = stopped ? '已停止' : '补录失败：' + t.error;
       t.finishedAt = nowIso();
-      // v1.1.5：补录失败就把这个补录项目删掉，别在项目列表里留一个半成品
+      // v1.1.5：补录没跑完就把这个补录项目删掉，别在项目列表里留一个半成品
+      // v1.2.5：用户主动停止也算「没跑完」，同样要清理，否则会留下做到一半的项目
       try {
         const failedProj = get(db, 'SELECT * FROM projects WHERE id = ?', pid0);
         if (failedProj) {
           t.cleaned = deleteProjectFully(failedProj);
-          t.message = '补录失败，已把这个补录项目删掉。原因：' + t.error;
+          t.message = stopped ? '已停止，补录项目已删除' : '补录失败，已把这个补录项目删掉。原因：' + t.error;
+        } else {
+          t.message = stopped ? '已停止' : t.message;
         }
       } catch (e2) {
-        t.message = '补录失败：' + t.error + '（自动清理没成功：' + String(e2 && e2.message || e2) + '）';
+        t.message = stopped
+          ? '已停止，但自动清理没成功：' + String(e2 && e2.message || e2)
+          : '补录失败：' + t.error + '（自动清理没成功：' + String(e2 && e2.message || e2) + '）';
       }
     }
   })();
@@ -1288,6 +1345,19 @@ route('GET', '/api/backfill/:id', async (req, res, ctx) => {
   const t = bfTaskOf(ctx.params.id);
   if (!t) return json(res, 404, { error: '任务不存在' });
   json(res, 200, t);
+});
+
+// v1.2.5：停止补录。
+// 以前前端点「停止任务」只是把项目删了，后台那串步骤还在闷头跑，跑完还会重新写归档、把任务条留在页面上。
+// 现在改成：先在这里打停止标记 → 后台在每个检查点退出 → 退出时自己清理半成品 → 任务状态变 stopped，任务条自动消失。
+route('POST', '/api/backfill/:id/stop', async (req, res, ctx) => {
+  const t = backfillTasks.get(ctx.params.id);
+  if (!t) return json(res, 404, { error: '任务不存在，可能已经结束了' });
+  if (t.state !== 'running') return json(res, 200, { ok: true, already: true, state: t.state, message: t.message || '' });
+  t.stopRequested = true;
+  t.message = '正在停止…';
+  if (t.analysisTaskId) { try { stopAnalysisTask(t.analysisTaskId); } catch {} }
+  json(res, 200, { ok: true, state: t.state, message: t.message });
 });
 
 // ---------- v1.1.4：项目补录（投完的老项目，传两份文件就自动归档） ----------
@@ -1797,7 +1867,8 @@ route('POST', '/api/projects/:id/close', async (req, res, ctx) => {
     return json(res, 400, { error: '请手动输入「关闭归档」四个字确认。', code: 'NEED_CONFIRM' });
   }
   try {
-    const r = archiveProject(p, db, { note: body.note || '', sessions: listSessions(p.id) });
+    // v1.2.5：归档后核对通过就清空项目目录里的原件（文件夹保留），归档成为唯一副本
+    const r = archiveProject(p, db, { note: body.note || '', sessions: listSessions(p.id), clearProject: true });
     const closedBy = mode === 'abandon' ? 'abandon' : 'normal';
     run(db, 'UPDATE projects SET status = ?, closedAt = ?, archiveNote = ?, closedBy = ?, abandonReason = ?, updatedAt = ? WHERE id = ?',
       'archived', nowIso(), (body.note || '') + '||' + r.relDir, closedBy, mode === 'abandon' ? String(body.abandonReason || '') : '', nowIso(), p.id);
@@ -1818,6 +1889,7 @@ route('POST', '/api/projects/:id/close', async (req, res, ctx) => {
     } catch (e) { console.log('[TWB] 知识卡提炼没启动：' + (e && e.message || e)); }
     json(res, 200, {
       ok: true, dir: r.dir, relDir: r.relDir, files: r.files,
+      cleared: r.cleared || null,
       cardTaskId,
       knowledge: r.knowledge || null,
       knowledgeSummary: r.knowledge && !r.knowledge.error
@@ -1832,9 +1904,28 @@ route('POST', '/api/projects/:id/close', async (req, res, ctx) => {
 route('POST', '/api/projects/:id/reopen', async (req, res, ctx) => {
   const p = get(db, 'SELECT * FROM projects WHERE id = ?', ctx.params.id);
   if (!p) return json(res, 404, { error: '项目不存在' });
+  // v1.2.5：归档后项目目录里的原件已被清空，重新打开时先从 归档/ 复制回来
+  let restored = null;
+  try {
+    const need = STAGE_SUBS.some((sub) => {
+      const dir = path.join(PROJECT_DIR, p.dir, sub);
+      if (!fs.existsSync(dir)) return true;
+      return fs.readdirSync(dir).length === 0;
+    });
+    if (need) restored = restoreProjectFiles(p);
+  } catch (e) {
+    restored = { ok: false, reason: String(e && e.message || e), files: 0 };
+  }
+  if (restored && !restored.ok) {
+    return json(res, 409, {
+      error: '这个项目的归档文件夹找不到了，没法把文件恢复回来。' + (restored.reason ? '（' + restored.reason + '）' : '') + '可以在「归档」里手动打开文件夹确认一下。',
+      code: 'ARCHIVE_MISSING',
+      relDir: archiveRelDirOf(p)
+    });
+  }
   run(db, 'UPDATE projects SET status = ?, closedAt = NULL, updatedAt = ? WHERE id = ?', 'active', nowIso(), p.id);
-  addEvent(db, p.id, 'archive', '项目重新打开');
-  json(res, 200, { ok: true });
+  addEvent(db, p.id, 'archive', '项目重新打开' + (restored && restored.files ? '，从归档恢复 ' + restored.files + ' 个文件' : ''));
+  json(res, 200, { ok: true, restored });
 });
 
 route('GET', '/api/archives', async (req, res) => {

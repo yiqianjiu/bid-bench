@@ -225,7 +225,95 @@ export function archiveProject(project, db, opt = {}) {
 
   // v1.2.0：知识卡提炼要用到的章节（调用方据此起一个后台提炼任务）
   const knowledgeChapters = payload ? payload.chapters : null;
-  return { dir: dst, relDir: path.relative(ARCHIVE_DIR, dst), files, summary, knowledge, knowledgeChapters };
+
+  // v1.2.5：归档完成后再核对一遍，核对通过才把项目目录里的原件清掉（文件夹保留）。
+  // 核对不通过就原样留着 —— 宁可多一份文件，也不能把没备份的东西删了。
+  const relDir = path.relative(ARCHIVE_DIR, dst);
+  let cleared = null;
+  if (opt.clearProject) {
+    try {
+      const v = verifyArchiveCopy({ ...project, archiveNote: '||' + relDir });
+      if (v.ok) cleared = { ok: true, removed: clearProjectFiles(project) };
+      else cleared = { ok: false, reason: v.reason, bad: v.bad };
+    } catch (e) {
+      cleared = { ok: false, reason: String(e && e.message || e) };
+    }
+  }
+
+  return { dir: dst, relDir, files, summary, knowledge, knowledgeChapters, cleared };
+}
+
+// ---------- v1.2.5：归档后清空项目目录，归档成为唯一副本 ----------
+// 背景：以前归档只是把 01~05 复制一份到 归档/，项目目录里的原件一直留着，
+// 于是同一份文件在磁盘上存了两份（用户看到「项目」和「归档」内容几乎一样就是这么来的）。
+// 现在改成：复制 → 逐个核对（存在 + 大小一致）→ 核对通过才清空项目目录下 01~05 的内容，
+// 项目文件夹本身和五个子文件夹保留（点开还是那个结构，只是里面空了）；
+// 重新打开项目时，再从 归档/ 把 01~05 复制回来。
+export const STAGE_SUBS = ['01招标文件', '02分析', '03制作', '04核查', '05递交'];
+
+
+function walkFiles(dir, base, out) {
+  if (!fs.existsSync(dir)) return;
+  for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+    const abs = path.join(dir, ent.name);
+    if (ent.isDirectory()) walkFiles(abs, base, out);
+    else if (ent.isFile()) out.push(path.relative(base, abs).split(path.sep).join('/'));
+  }
+}
+
+// 核对：项目目录里的每个文件，在归档目录里都得有一份大小一致的
+export function verifyArchiveCopy(project) {
+  const src = path.join(PROJECT_DIR, project.dir || '');
+  const relDir = archiveRelDirOf(project);
+  const dst = relDir ? path.join(ARCHIVE_DIR, relDir) : '';
+  if (!dst || !fs.existsSync(dst)) return { ok: false, reason: '还没找到这个项目的归档文件夹', total: 0, bad: [] };
+  const bad = [];
+  const rels = [];
+  // 按子目录取相对路径核对，避免同名文件在不同子目录里混淆
+  for (const sub of STAGE_SUBS) {
+    const list = [];
+    walkFiles(path.join(src, sub), path.join(src, sub), list);
+    for (const r of list) {
+      const a = path.join(src, sub, r);
+      const b = path.join(dst, sub, r);
+      if (!fs.existsSync(b)) { bad.push(sub + '/' + r + '（归档里没有）'); continue; }
+      try {
+        if (fs.statSync(a).size !== fs.statSync(b).size) bad.push(sub + '/' + r + '（大小不一致）');
+      } catch (e) { bad.push(sub + '/' + r + '（读不了）'); }
+    }
+    rels.push(sub + ':' + list.length);
+  }
+  return { ok: bad.length === 0, reason: bad.length ? '归档核对没通过' : '', total: rels.join('，'), bad: bad.slice(0, 20) };
+}
+
+// 清空项目目录下 01~05 的内容（文件夹保留），归档成为唯一副本
+export function clearProjectFiles(project) {
+  const src = path.join(PROJECT_DIR, project.dir || '');
+  let removed = 0;
+  for (const sub of STAGE_SUBS) {
+    const dir = path.join(src, sub);
+    if (!fs.existsSync(dir)) continue;
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const abs = path.join(dir, ent.name);
+      try {
+        if (ent.isDirectory()) { fs.rmSync(abs, { recursive: true, force: true }); removed++; }
+        else if (ent.isFile()) { fs.rmSync(abs, { force: true }); removed++; }
+      } catch (e) {}
+    }
+  }
+  return removed;
+}
+
+// 重新打开项目：把归档里的 01~05 复制回项目目录（归档本身不动，仍是完整副本）
+export function restoreProjectFiles(project) {
+  const relDir = archiveRelDirOf(project);
+  if (!relDir) return { ok: false, reason: '这个项目没有归档路径记录', files: 0 };
+  const dst = path.join(ARCHIVE_DIR, relDir);
+  if (!fs.existsSync(dst)) return { ok: false, reason: '归档文件夹已经不在了', files: 0 };
+  const src = path.join(PROJECT_DIR, project.dir || '');
+  let files = 0;
+  for (const sub of STAGE_SUBS) files += copyDir(path.join(dst, sub), path.join(src, sub));
+  return { ok: true, reason: '', files };
 }
 
 // v1.1.3：项目记录里存的归档相对路径（archiveNote 格式：备注||年份\编号_项目名）

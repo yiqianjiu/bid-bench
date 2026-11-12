@@ -1,7 +1,7 @@
 {
   "port": 7830,
   "company": "",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "autoExitOnClose": true,
   "convertTimeoutSec": 480,
   "providers": [
